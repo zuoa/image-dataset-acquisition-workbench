@@ -1,0 +1,105 @@
+name: Build desktop apps
+
+on:
+  push:
+    tags:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            artifact: Vannus-macos-arm64
+          - os: macos-15-intel
+            artifact: Vannus-macos-x64
+          - os: windows-2022
+            artifact: Vannus-windows-x64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.12.13"
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Build application
+        run: uv run --locked python scripts/build.py
+
+      - name: Verify and archive macOS application
+        if: runner.os == 'macOS'
+        env:
+          ARTIFACT_NAME: ${{ matrix.artifact }}
+        run: |
+          codesign --verify --deep --strict dist/Vannus.app
+          ditto -c -k --sequesterRsrc --keepParent dist/Vannus.app "dist/$ARTIFACT_NAME.zip"
+
+      - name: Archive Windows application
+        if: runner.os == 'Windows'
+        env:
+          ARTIFACT_NAME: ${{ matrix.artifact }}
+        run: |
+          if (!(Test-Path dist/Vannus/Vannus.exe)) {
+            throw "Missing Windows executable: dist/Vannus/Vannus.exe"
+          }
+          Compress-Archive -Path dist/Vannus -DestinationPath "dist/$env:ARTIFACT_NAME.zip"
+
+      - name: Upload application archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  release:
+    name: Publish tag release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download application archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: Vannus-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" artifacts/*.zip --clobber
+          else
+            gh release create "$RELEASE_TAG" artifacts/*.zip \
+              --verify-tag --generate-notes --title "Vannus $RELEASE_TAG"
+          fi

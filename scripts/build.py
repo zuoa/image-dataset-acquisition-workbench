@@ -5,17 +5,17 @@ import sys
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QApplication
 
 root = Path(__file__).resolve().parents[1]
 build_dir = root / "build"
 build_dir.mkdir(exist_ok=True)
 
 # Render the repo-native SVG into platform icons, keeping one source of truth.
-application = QApplication([])
+# SVG-to-image rendering does not need a desktop session on CI runners.
+application = QCoreApplication([])
 image = QImage(1024, 1024, QImage.Format.Format_ARGB32)
 image.fill(Qt.GlobalColor.transparent)
 painter = QPainter(image)

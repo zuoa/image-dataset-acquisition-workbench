@@ -65,4 +65,25 @@ uv run python scripts/build.py
 
 在对应目标操作系统本机打包，输出 `dist/Vannus.app`（macOS）或 `dist/Vannus/Vannus.exe`（Windows）。macOS 的相机权限说明已写入 app 的 Info.plist。对外发布仍需配置代码签名、公证，以及确定 QFluentWidgets 等依赖的授权路线。
 
+### GitHub Actions 自动构建
+
+将包含工作流的提交推送到 GitHub 后，推送任意 tag 即可触发 `.github/workflows/build.yml`：
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+工作流使用 Python 3.13 和 `uv.lock` 中的固定依赖，在各目标平台的 GitHub runner 上分别运行现有打包脚本：
+
+| 压缩包 | 适用平台 | 解压内容 |
+| --- | --- | --- |
+| `Vannus-macos-arm64.zip` | macOS Apple Silicon | `Vannus.app` |
+| `Vannus-macos-x64.zip` | macOS Intel | `Vannus.app` |
+| `Vannus-windows-x64.zip` | Windows x64 | `Vannus/`，内含 `Vannus.exe` 及运行依赖 |
+
+压缩包保存在 Actions 运行页面的 Artifacts 中，保留 30 天。三个构建全部成功后，自动创建对应 tag 的 GitHub Release 并附上压缩包；重跑工作流会更新同名附件。使用内置 `GITHUB_TOKEN`，无需额外配置发布密钥。macOS 压缩包保留应用的执行权限及符号链接；Windows 需解压并保留整个 `Vannus/` 目录后运行。
+
+也可在 Actions → Build desktop apps → Run workflow 手动构建分支，仅生成 Artifacts；通过 CLI 或 API 指定 tag 触发手动运行时，同样会发布 Release。自动构建不启动应用或运行相机验收；macOS 仅带 ad-hoc 签名，未配置开发者证书、公证或 Windows 代码签名，真机验收仍按上述清单执行。
+
 首版面向个人和团队内部使用，未包含 Pro 专属组件。依赖许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
