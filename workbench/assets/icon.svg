@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Vannus</title>
+  <desc id="desc">Two overlapping image planes form a V on a softly illuminated blue tile.</desc>
+  <defs>
+    <linearGradient id="tile" x1="80" y1="24" x2="416" y2="496" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#66B2FF"/>
+      <stop offset="0.46" stop-color="#3978F6"/>
+      <stop offset="1" stop-color="#354ECD"/>
+    </linearGradient>
+    <radialGradient id="light" cx="112" cy="36" r="440" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#C5F0FF" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#C5F0FF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="120" y1="16" x2="384" y2="496" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.62"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#162D95" stop-opacity="0.24"/>
+    </linearGradient>
+    <linearGradient id="back" x1="147" y1="132" x2="263" y2="379" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#DEEFFF"/>
+      <stop offset="0.5" stop-color="#B9D8FF"/>
+      <stop offset="1" stop-color="#7FAAFF"/>
+    </linearGradient>
+    <linearGradient id="front" x1="350" y1="132" x2="247" y2="386" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="0.65" stop-color="#F6FBFF"/>
+      <stop offset="1" stop-color="#D4E6FF"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="253" y1="318" x2="272" y2="328" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3D61C9" stop-opacity="0"/>
+      <stop offset="1" stop-color="#3D61C9" stop-opacity="0.3"/>
+    </linearGradient>
+    <path id="shape" d="M149 16H363C449 16 496 63 496 149V363C496 449 449 496 363 496H149C63 496 16 449 16 363V149C16 63 63 16 149 16Z"/>
+  </defs>
+  <use href="#shape" transform="translate(0 7)" fill="#183C9C" opacity="0.08"/>
+  <use href="#shape" transform="translate(0 3)" fill="#183C9C" opacity="0.12"/>
+  <use href="#shape" fill="url(#tile)"/>
+  <use href="#shape" fill="url(#light)"/>
+  <use href="#shape" fill="none" stroke="url(#rim)" stroke-width="2"/>
+  <g transform="translate(0 5)" fill="#153A9F" opacity="0.15">
+    <path d="M117 145C113 137 117 132 125 132H179C185 132 190 135 193 142L273 316L250 373C246 383 234 381 229 371Z"/>
+    <path d="M316 141C319 135 323 132 330 132H387C395 132 399 138 395 146L285 374C281 382 276 386 267 386H237C247 379 253 367 259 352Z"/>
+  </g>
+  <path d="M117 145C113 137 117 132 125 132H179C185 132 190 135 193 142L273 316L250 373C246 383 234 381 229 371Z" fill="url(#back)"/>
+  <path d="M252 271L273 316L250 373C246 383 234 381 229 371Z" fill="url(#fold)"/>
+  <path d="M316 141C319 135 323 132 330 132H387C395 132 399 138 395 146L285 374C281 382 276 386 267 386H237C247 379 253 367 259 352Z" fill="url(#front)"/>
+  <path d="M125 133H179C185 133 189 136 192 142M330 133H387C393 133 397 137 394 144" fill="none" stroke="#FFFFFF" stroke-opacity="0.68" stroke-width="2" stroke-linecap="round"/>
+</svg>
