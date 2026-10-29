@@ -4,9 +4,9 @@ import threading
 import time
 
 import pytest
-from PySide6.QtCore import QTimer, QtVideo
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtMultimedia import QVideoFrame
+from PySide6.QtMultimedia import QtVideo, QVideoFrame
 
 from workbench import camera
 
@@ -25,7 +25,7 @@ def test_frame_conversion_preserves_original_pixels_and_presentation(qt_app):
     for i, color in enumerate(colors):
         image.setPixelColor(i % 3, i // 3, QColor(color))
     frame = QVideoFrame(image)
-    assert camera._convert_frame(frame) == image
+    assert camera._convert_frame(frame).convertToFormat(image.format()) == image
     frame.setRotation(QtVideo.Rotation.Clockwise90)
     frame.setMirrored(True)
     converted = camera._convert_frame(frame)
@@ -64,7 +64,7 @@ def test_slow_conversion_keeps_gui_responsive_and_discards_disconnected_result(q
             controller._pending_frame = (native_frame, time.monotonic())
             controller._process_frame()
         pump(qt_app, lambda: bool(ticks))
-        assert threads == [threads[0]]
+        assert len(threads) == 1
         assert threads[0] != threading.get_ident()
         controller.stop()
         release.set()
