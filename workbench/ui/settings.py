@@ -15,6 +15,7 @@ from qfluentwidgets import (
     FluentIcon as FIF,
 )
 
+from .. import __version__
 from .common import confirm, heading, muted, panel
 from .theme import BLUE, INK
 
@@ -160,12 +161,8 @@ class SettingsPage(QWidget):
         cl.addWidget(logs)
         box.addWidget(card)
         card, cl = panel("关于 Vannus")
-        cl.addWidget(SubtitleLabel("图像数据集采集工作台  0.1.0"))
-        cl.addWidget(
-            muted(
-                "PySide6 · QFluentWidgets · SQLite · Pillow\n首版面向个人及团队内部使用。组件许可见项目 THIRD_PARTY_NOTICES.md；对外分发前确定授权路线。"
-            )
-        )
+        cl.addWidget(SubtitleLabel(f"版本 {__version__}"))
+        cl.addWidget(muted("Power By AJ"))
         box.addWidget(card)
         box.addStretch()
         scroll.setWidget(content)

@@ -5,7 +5,17 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QCameraPermission, QCoreApplication, QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QCameraPermission,
+    QCoreApplication,
+    QObject,
+    Qt,
+    QThreadPool,
+    QTimer,
+    QUrl,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QImage, QTransform
 from PySide6.QtMultimedia import (
     QCamera,
@@ -13,8 +23,24 @@ from PySide6.QtMultimedia import (
     QMediaDevices,
     QMediaFormat,
     QMediaRecorder,
+    QVideoFrame,
     QVideoSink,
 )
+
+from .jobs import Job
+
+
+def _convert_frame(frame):
+    image = frame.toImage()
+    if image.isNull():
+        return image
+    # Presentation transforms are not included in toImage(). Keep the preview
+    # and saved photo in the same pixel coordinates, without resizing either.
+    if frame.rotation().value:
+        image = image.transformed(QTransform().rotate(frame.rotation().value))
+    if frame.mirrored():
+        image = image.mirrored(True, False)
+    return image.copy()  # Release the native camera buffer on the worker thread.
 
 
 class CameraController(QObject):
@@ -33,8 +59,16 @@ class CameraController(QObject):
         self.media.videoInputsChanged.connect(self._devices_changed)
         self.session = QMediaCaptureSession(self)
         self.sink = QVideoSink(self)
-        self.sink.videoFrameChanged.connect(self._frame)
+        self.sink.videoFrameChanged.connect(self._queue_frame)
         self.session.setVideoSink(self.sink)
+        self.frame_pool = QThreadPool(self)
+        self.frame_pool.setMaxThreadCount(1)
+        self._frame_job = None
+        self._pending_frame = None
+        self._stream_generation = 0
+        self.frame_timer = QTimer(self)
+        self.frame_timer.setInterval(42)
+        self.frame_timer.timeout.connect(self._process_frame)
         self.recorder = QMediaRecorder(self)
         self.session.setRecorder(self.recorder)
         self.recorder.recorderStateChanged.connect(self._recorder_state)
@@ -47,7 +81,6 @@ class CameraController(QObject):
         self.camera = None
         self.latest = QImage()
         self.frame_at = 0.0
-        self.last_ui_frame = 0.0
         self.device_id = None
         self.format = None
         self.watchdog = QTimer(self)
@@ -90,7 +123,14 @@ class CameraController(QObject):
             self.status.emit("相机权限被拒绝，请在系统隐私设置中允许本应用访问摄像头")
             return
         if state == Qt.PermissionStatus.Undetermined:
-            app.requestPermission(permission, self, lambda _: self.open(index, format_index))
+
+            def permitted(result):
+                if result.status() == Qt.PermissionStatus.Granted:
+                    self.open(index, format_index)
+                else:
+                    self.status.emit("未获得相机权限，请检查系统隐私设置及应用的相机权限声明")
+
+            app.requestPermission(permission, self, permitted)
             return
         self.stop()
         device = devices[index]
@@ -104,33 +144,52 @@ class CameraController(QObject):
         self.camera.activeChanged.connect(self.connected)
         self.session.setCamera(self.camera)
         self.status.emit("正在连接 " + device.description())
+        self.frame_timer.start()
         self.camera.start()
 
     def _error(self, message):
         self.status.emit("摄像头错误：" + message)
+        self._stream_generation += 1
+        self._pending_frame = None
         self.latest = QImage()
         self.connected.emit(False)
         if self.video_busy:
             self._recording_error = "摄像头错误：" + message
             self.stop_recording()
 
-    def _frame(self, frame):
-        if not frame.isValid():
+    @Slot(QVideoFrame)
+    def _queue_frame(self, frame):
+        if self.camera and frame.isValid():
+            self._pending_frame = (QVideoFrame(frame), time.monotonic())
+
+    @Slot()
+    def _process_frame(self):
+        # Keep just the newest frame and one conversion in flight. Converting
+        # every native frame on the GUI thread starves input at high resolutions
+        # or frame rates, even when PNG encoding already runs in the background.
+        if self._frame_job is not None or self._pending_frame is None:
             return
-        image = frame.toImage()
-        if image.isNull():
+        frame, received_at = self._pending_frame
+        self._pending_frame = None
+        generation = self._stream_generation
+        self._frame_job = Job(lambda cancel, progress: (generation, received_at, _convert_frame(frame)))
+        self._frame_job.signals.succeeded.connect(self._frame_ready)
+        self._frame_job.signals.failed.connect(self._error)
+        self._frame_job.signals.finished.connect(self._frame_finished)
+        self.frame_pool.start(self._frame_job)
+
+    @Slot(object)
+    def _frame_ready(self, result):
+        generation, received_at, image = result
+        if generation != self._stream_generation or image.isNull():
             return
-        # toImage() converts pixel data only; apply presentation transforms once
-        # so the saved image and the viewfinder use the exact same coordinates.
-        if frame.rotation().value:
-            image = image.transformed(QTransform().rotate(frame.rotation().value))
-        if frame.mirrored():
-            image = image.mirrored(True, False)
-        self.latest = image.copy()
-        self.frame_at = time.monotonic()
-        if self.frame_at - self.last_ui_frame >= 1 / 24:
-            self.frame.emit(self.latest)
-            self.last_ui_frame = self.frame_at
+        self.latest = image
+        self.frame_at = received_at
+        self.frame.emit(image)
+
+    @Slot()
+    def _frame_finished(self):
+        self._frame_job = None
 
     def _check_stream(self):
         if self.camera and self.camera.isActive() and self.frame_at and time.monotonic() - self.frame_at > 4:
@@ -142,7 +201,7 @@ class CameraController(QObject):
     def snapshot(self):
         if self.latest.isNull() or time.monotonic() - self.frame_at > 2:
             raise ValueError("暂无可采集的新画面，请连接摄像头并等待预览")
-        return self.latest.copy()
+        return QImage(self.latest)  # Immutable shared pixels; saving detaches on the worker.
 
     def metadata(self):
         if not self.camera:
@@ -233,6 +292,9 @@ class CameraController(QObject):
             self._stop_after_recording = True
             self.stop_recording()
             return
+        self.frame_timer.stop()
+        self._stream_generation += 1
+        self._pending_frame = None
         self.latest = QImage()
         self.frame_at = 0
         self.format = None
