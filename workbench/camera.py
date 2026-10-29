@@ -58,9 +58,8 @@ class CameraController(QObject):
         self.media = QMediaDevices(self)
         self.media.videoInputsChanged.connect(self._devices_changed)
         self.session = QMediaCaptureSession(self)
-        self.sink = QVideoSink(self)
-        self.sink.videoFrameChanged.connect(self._queue_frame)
-        self.session.setVideoSink(self.sink)
+        self.sink = None
+        self._reset_sink()
         self.frame_pool = QThreadPool(self)
         self.frame_pool.setMaxThreadCount(1)
         self._frame_job = None
@@ -161,6 +160,18 @@ class CameraController(QObject):
     def _queue_frame(self, frame):
         if self.camera and frame.isValid():
             self._pending_frame = (QVideoFrame(frame), time.monotonic())
+
+    def _reset_sink(self):
+        # A stopped stream can still have native frame events queued for its
+        # sink. Give each connection a new receiver so those events cannot be
+        # mistaken for frames from the newly opened camera/format.
+        self.session.setVideoSink(None)
+        if self.sink is not None:
+            self.sink.videoFrameChanged.disconnect(self._queue_frame)
+            self.sink.deleteLater()
+        self.sink = QVideoSink(self)
+        self.sink.videoFrameChanged.connect(self._queue_frame)
+        self.session.setVideoSink(self.sink)
 
     @Slot()
     def _process_frame(self):
@@ -303,4 +314,5 @@ class CameraController(QObject):
             self.session.setCamera(None)
             self.camera.deleteLater()
             self.camera = None
+        self._reset_sink()
         self.connected.emit(False)
