@@ -9,6 +9,7 @@ from PySide6.QtCore import (
     QCameraPermission,
     QCoreApplication,
     QObject,
+    QSize,
     Qt,
     QThreadPool,
     QTimer,
@@ -29,6 +30,9 @@ from PySide6.QtMultimedia import (
 
 from .jobs import Job
 
+PREVIEW_SIZE = QSize(1280, 720)
+PREVIEW_FPS = 8
+
 
 def _convert_frame(frame):
     image = frame.toImage()
@@ -45,6 +49,7 @@ def _convert_frame(frame):
 
 class CameraController(QObject):
     frame = Signal(QImage)
+    preview = Signal(QImage, QSize)
     status = Signal(str)
     devices_changed = Signal()
     connected = Signal(bool)
@@ -65,9 +70,10 @@ class CameraController(QObject):
         self._frame_job = None
         self._frame_job_generation = None
         self._pending_frame = None
+        self.saving_photo = False
         self._stream_generation = 0
         self.frame_timer = QTimer(self)
-        self.frame_timer.setInterval(42)
+        self.frame_timer.setInterval(round(1000 / PREVIEW_FPS))
         self.frame_timer.timeout.connect(self._process_frame)
         self.recorder = QMediaRecorder(self)
         self.session.setRecorder(self.recorder)
@@ -81,6 +87,7 @@ class CameraController(QObject):
         self.camera = None
         self.latest = QImage()
         self.frame_at = 0.0
+        self.received_at = 0.0
         self.device_id = None
         self.format = None
         self.watchdog = QTimer(self)
@@ -160,7 +167,11 @@ class CameraController(QObject):
     @Slot(QVideoFrame)
     def _queue_frame(self, frame):
         if self.camera and frame.isValid():
-            self._pending_frame = (QVideoFrame(frame), time.monotonic())
+            self.received_at = time.monotonic()
+            self._pending_frame = (QVideoFrame(frame), self.received_at)
+
+    def set_saving_photo(self, saving):
+        self.saving_photo = saving
 
     def _reset_sink(self):
         # A stopped stream can still have native frame events queued for its
@@ -179,12 +190,24 @@ class CameraController(QObject):
         # Keep just the newest frame and one conversion in flight. Converting
         # every native frame on the GUI thread starves input at high resolutions
         # or frame rates, even when PNG encoding already runs in the background.
-        if self._frame_job is not None or self._pending_frame is None:
+        if self.saving_photo or self._frame_job is not None or self._pending_frame is None:
             return
         frame, received_at = self._pending_frame
         self._pending_frame = None
         generation = self._stream_generation
-        self._frame_job = Job(lambda cancel, progress: (generation, received_at, _convert_frame(frame)))
+
+        def convert(cancel, progress):
+            image = _convert_frame(frame)
+            preview = image
+            if image.width() > PREVIEW_SIZE.width() or image.height() > PREVIEW_SIZE.height():
+                preview = image.scaled(
+                    PREVIEW_SIZE,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            return generation, received_at, image, preview
+
+        self._frame_job = Job(convert)
         self._frame_job_generation = generation
         self._frame_job.signals.succeeded.connect(self._frame_ready)
         self._frame_job.signals.failed.connect(self._frame_failed)
@@ -193,11 +216,12 @@ class CameraController(QObject):
 
     @Slot(object)
     def _frame_ready(self, result):
-        generation, received_at, image = result
+        generation, received_at, image, preview = result
         if generation != self._stream_generation or image.isNull():
             return
         self.latest = image
         self.frame_at = received_at
+        self.preview.emit(preview, image.size())
         self.frame.emit(image)
 
     @Slot(str)
@@ -211,7 +235,12 @@ class CameraController(QObject):
         self._frame_job_generation = None
 
     def _check_stream(self):
-        if self.camera and self.camera.isActive() and self.frame_at and time.monotonic() - self.frame_at > 4:
+        if (
+            self.camera
+            and self.camera.isActive()
+            and self.received_at
+            and time.monotonic() - self.received_at > 4
+        ):
             self.status.emit("未收到新画面，请检查设备或重新连接")
             if self.video_busy:
                 self._recording_error = "摄像头画面中断，录制已停止"
@@ -316,6 +345,7 @@ class CameraController(QObject):
         self._pending_frame = None
         self.latest = QImage()
         self.frame_at = 0
+        self.received_at = 0
         self.format = None
         if self.camera:
             self.camera.stop()

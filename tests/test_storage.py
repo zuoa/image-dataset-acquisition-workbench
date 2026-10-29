@@ -45,6 +45,29 @@ def test_capture_is_lossless_and_crop_coordinates_match(archive):
     assert original.getpixel((0, 0)) == (30, 90, 160)
 
 
+def test_fast_capture_png_preserves_all_original_and_crop_pixels(tmp_path):
+    import random
+
+    workspace = Workspace(tmp_path / "fast-capture")
+    dataset = workspace.save_dataset("无损快速采集")
+    batch = workspace.save_batch(dataset, "像素检查")
+    source = Image.frombytes("RGB", (301, 199), random.Random(42).randbytes(301 * 199 * 3))
+    photo_id = workspace.add_photo(
+        source,
+        dataset,
+        batch,
+        regions=[dict(name="中心", x=71, y=23, w=101, h=73)],
+        png_compress_level=1,
+    )
+    record = workspace.photo(photo_id)
+    with Image.open(workspace.path(record["original"])) as original:
+        assert original.size == source.size
+        assert original.tobytes() == source.tobytes()
+    crop_path = json.loads(record["processing"])[0]["crops"][0]["path"]
+    with Image.open(workspace.path(crop_path)) as cropped:
+        assert cropped.tobytes() == source.crop((71, 23, 172, 96)).tobytes()
+
+
 def test_invalid_crop_rolls_back_all_files_and_database(archive):
     workspace, dataset, batch, _, _ = archive
     with pytest.raises(ValueError):

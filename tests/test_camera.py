@@ -35,6 +35,31 @@ def test_frame_conversion_preserves_original_pixels_and_presentation(qt_app):
     ]
 
 
+def test_preview_is_bounded_while_snapshot_keeps_full_resolution(qt_app):
+    controller = camera.CameraController()
+    image = QImage(1600, 1200, QImage.Format.Format_RGB32)
+    image.fill(QColor("red"))
+    previews = []
+    controller.preview.connect(lambda preview, size: previews.append((preview, size)))
+    try:
+        controller._pending_frame = (QVideoFrame(image), time.monotonic())
+        controller.set_saving_photo(True)
+        controller._process_frame()
+        assert controller._frame_job is None
+        controller.set_saving_photo(False)
+        controller._process_frame()
+        pump(qt_app, lambda: bool(previews))
+        preview, size = previews[0]
+        assert size == image.size()
+        assert preview.width() <= 1280 and preview.height() <= 720
+        assert controller.snapshot().size() == image.size()
+        assert controller.snapshot().pixelColor(1599, 1199) == QColor("red")
+    finally:
+        controller.stop()
+        controller.frame_pool.waitForDone()
+        qt_app.processEvents()
+
+
 @pytest.mark.parametrize("conversion_error", [False, True])
 def test_slow_conversion_keeps_gui_responsive_and_discards_disconnected_result(
     qt_app, monkeypatch, conversion_error

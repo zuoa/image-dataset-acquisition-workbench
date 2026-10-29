@@ -297,7 +297,7 @@ class CapturePage(QWidget):
         splitter.setStretchFactor(0, 1)
         splitter.setSizes([850, 330])
 
-        self.camera.frame.connect(self.canvas.set_image)
+        self.camera.preview.connect(self.canvas.set_image)
         self.camera.status.connect(self.camera_status)
         self.camera.connected.connect(self.camera_connected)
         self.camera.devices_changed.connect(self.refresh_devices)
@@ -433,9 +433,10 @@ class CapturePage(QWidget):
 
     def update_capture_controls(self):
         busy = self.camera.video_busy
+        saving_photo = self.camera.saving_photo
         active = bool(self.camera.camera and self.camera.camera.isActive())
-        self.options_scroll.setEnabled(not busy)
-        self.mode_combo.setEnabled(not busy)
+        self.options_scroll.setEnabled(not busy and not saving_photo)
+        self.mode_combo.setEnabled(not busy and not saving_photo)
         self.sample.setEnabled(not busy)
         self.browse_videos.setEnabled(not busy)
         self.recording_time.setVisible(busy)
@@ -743,9 +744,9 @@ class CapturePage(QWidget):
             {"name": self.template["name"] if self.template else "采集热区"},
         )
         if dialog.exec():
-            image = self.canvas.image
+            size = self.canvas.source_size
             self.template = self.app.workspace.save_template(
-                self.dataset_id(), dialog.values()["name"], image.width(), image.height(), self.canvas.regions
+                self.dataset_id(), dialog.values()["name"], size.width(), size.height(), self.canvas.regions
             )
             self._dataset_changed(preserve=True)
             self.app.notify("模板已保存；同名模板自动创建新版本")
@@ -757,7 +758,7 @@ class CapturePage(QWidget):
             return
         template = self.templates[index - 1]
         image = self.canvas.image
-        if image.isNull() or (image.width(), image.height()) != (template["width"], template["height"]):
+        if image.isNull() or self.canvas.source_size.toTuple() != (template["width"], template["height"]):
             self.app.notify("请连接相机并使用与模板一致的图像分辨率", error=True)
             self.template_combo.setCurrentIndex(0)
             return
@@ -838,10 +839,14 @@ class CapturePage(QWidget):
                 camera=self.camera.metadata(),
                 regions=[dict(r) for r in self.canvas.regions],
                 template=self.template,
+                png_compress_level=1,
             )
             dataset_id, batch_id = self.dataset_id(), self.batch_id()
 
             def save(cancel, progress):
+                # Let the single in-flight preview conversion finish off the GUI
+                # thread before encoding. New conversions pause until this save ends.
+                self.camera.frame_pool.waitForDone()
                 rgb = image.convertToFormat(QImage.Format.Format_RGB888)
                 with Image.frombytes(
                     "RGB",
@@ -853,7 +858,7 @@ class CapturePage(QWidget):
                 ) as frame:
                     return self.app.workspace.add_photo(frame, dataset_id, batch_id, **kwargs)
 
-            self.app.start_task("正在保存原图与裁剪图…", save, self._saved)
+            self.app.start_task("正在保存原图与裁剪图…", save, self._saved, photo_capture=True)
         except Exception as error:
             self.stop_interval()
             self.app.notify(str(error), error=True)

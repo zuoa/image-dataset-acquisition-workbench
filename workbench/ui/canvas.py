@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 from qfluentwidgets import FluentIcon as FIF
@@ -18,6 +18,7 @@ class ImageCanvas(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.image = QImage()
+        self.source_size = QSize()
         self.regions = []
         self.show_regions = True
         self.editable = editable
@@ -32,10 +33,11 @@ class ImageCanvas(QWidget):
             "滚轮缩放 · 双击适应窗口" + (" · 拖动绘制热区 · 选中后 Delete 删除" if editable else "")
         )
 
-    def set_image(self, image):
-        previous = self.image.size()
+    def set_image(self, image, source_size=None):
+        previous = self.source_size
         self.image = image
-        if previous != image.size():
+        self.source_size = QSize(source_size) if source_size is not None else image.size()
+        if previous != self.source_size:
             self.zoom = 1.0
             self.pan = QPointF()
             # Never silently adapt a template to another resolution.
@@ -43,7 +45,7 @@ class ImageCanvas(QWidget):
                 self.regions = []
                 self.selected = -1
                 self.regions_changed.emit([])
-            self.dimensions_changed.emit(image.width(), image.height())
+            self.dimensions_changed.emit(self.source_size.width(), self.source_size.height())
         self.update()
 
     def set_regions(self, regions):
@@ -55,8 +57,11 @@ class ImageCanvas(QWidget):
     def image_rect(self):
         if self.image.isNull():
             return QRectF()
-        scale = min(self.width() / self.image.width(), self.height() / self.image.height()) * self.zoom
-        width, height = self.image.width() * scale, self.image.height() * scale
+        scale = (
+            min(self.width() / self.source_size.width(), self.height() / self.source_size.height())
+            * self.zoom
+        )
+        width, height = self.source_size.width() * scale, self.source_size.height() * scale
         return QRectF(
             (self.width() - width) / 2 + self.pan.x(),
             (self.height() - height) / 2 + self.pan.y(),
@@ -69,13 +74,24 @@ class ImageCanvas(QWidget):
         if rect.isEmpty():
             return QPointF()
         return QPointF(
-            max(0, min(self.image.width(), (point.x() - rect.x()) * self.image.width() / rect.width())),
-            max(0, min(self.image.height(), (point.y() - rect.y()) * self.image.height() / rect.height())),
+            max(
+                0,
+                min(
+                    self.source_size.width(), (point.x() - rect.x()) * self.source_size.width() / rect.width()
+                ),
+            ),
+            max(
+                0,
+                min(
+                    self.source_size.height(),
+                    (point.y() - rect.y()) * self.source_size.height() / rect.height(),
+                ),
+            ),
         )
 
     def screen_rect(self, region):
         rect = self.image_rect()
-        scale = rect.width() / self.image.width()
+        scale = rect.width() / self.source_size.width()
         return QRectF(
             rect.x() + region["x"] * scale,
             rect.y() + region["y"] * scale,
@@ -194,14 +210,18 @@ class ImageCanvas(QWidget):
             old = self.original_region
             if mode == "move":
                 region["x"] = round(
-                    max(0, min(self.image.width() - old["w"], old["x"] + current.x() - self.start.x()))
+                    max(0, min(self.source_size.width() - old["w"], old["x"] + current.x() - self.start.x()))
                 )
                 region["y"] = round(
-                    max(0, min(self.image.height() - old["h"], old["y"] + current.y() - self.start.y()))
+                    max(0, min(self.source_size.height() - old["h"], old["y"] + current.y() - self.start.y()))
                 )
             else:
-                region["w"] = round(max(2, min(self.image.width() - region["x"], current.x() - region["x"])))
-                region["h"] = round(max(2, min(self.image.height() - region["y"], current.y() - region["y"])))
+                region["w"] = round(
+                    max(2, min(self.source_size.width() - region["x"], current.x() - region["x"]))
+                )
+                region["h"] = round(
+                    max(2, min(self.source_size.height() - region["y"], current.y() - region["y"]))
+                )
         self.update()
 
     def mouseReleaseEvent(self, event):

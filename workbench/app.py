@@ -56,6 +56,7 @@ class MainWindow(FluentWindow):
         self.feedback = CaptureFeedback(preferences, self)
         self._success = None
         self._task_label = ""
+        self._photo_capture = False
         self.setWindowTitle(TITLE)
         self.resize(1440, 940)
         self.setMinimumSize(1200, 800)
@@ -171,7 +172,7 @@ class MainWindow(FluentWindow):
             parent=self,
         )
 
-    def start_task(self, label, function, success=None):
+    def start_task(self, label, function, success=None, *, photo_capture=False):
         if self.capture.camera.video_busy:
             self.notify("请先停止录制并等待视频保存", error=True)
             return
@@ -179,6 +180,7 @@ class MainWindow(FluentWindow):
             self.notify("请等待当前任务完成", error=True)
             return
         self._success = success
+        self._photo_capture = photo_capture
         self._task_label = label
         self.task_text.setText(label)
         self.task_progress.setValue(0)
@@ -203,13 +205,16 @@ class MainWindow(FluentWindow):
         self.notify(error, error=True)
 
     def _busy_changed(self, busy):
+        saving_photo = busy and self._photo_capture
+        self.capture.camera.set_saving_photo(saving_photo)
         self.task_bar.setVisible(busy)
         self.task_bar.raise_()
-        self.stackedWidget.setEnabled(not busy)
+        self.stackedWidget.setEnabled(not busy or saving_photo)
         self.navigationInterface.setEnabled(not busy and not self.capture.camera.video_busy)
         if not busy:
             self._success = None
-            self.capture.update_capture_controls()
+            self._photo_capture = False
+        self.capture.update_capture_controls()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

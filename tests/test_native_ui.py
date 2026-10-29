@@ -1,6 +1,8 @@
 import sys
+import threading
 import time
 
+import pytest
 from PIL import Image
 from PySide6.QtCore import QItemSelectionModel, QLockFile, QSettings
 from PySide6.QtWidgets import QListView
@@ -130,6 +132,55 @@ def test_custom_fields_form_has_named_rows_and_blocks_duplicate_keys(qt_app):
     assert not dialog.validate()
     dialog.reject()
     parent.close()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_photo_save_keeps_canvas_enabled_and_restores_preview_priority(qt_app, tmp_path, fail):
+    from workbench.storage import Workspace
+
+    workspace = Workspace(tmp_path / "async-photo")
+    dataset = workspace.save_dataset("异步保存")
+    workspace.save_batch(dataset, "当前批次")
+    lock = QLockFile(str(workspace.root / ".fieldwork.lock"))
+    assert lock.tryLock(100)
+    preferences = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(workspace, preferences, tmp_path, lock)
+    release = threading.Event()
+    completed = []
+    errors = []
+    window.runner.error.connect(errors.append)
+
+    def save(cancel, progress):
+        assert release.wait(5)
+        if fail:
+            raise OSError("图片写入失败")
+        return "saved"
+
+    try:
+        window.show()
+        window.open_capture(dataset)
+        assert window.start_task("保存照片", save, completed.append, photo_capture=True)
+        assert window.runner.busy
+        assert window.capture.camera.saving_photo
+        assert window.stackedWidget.isEnabled()
+        assert window.capture.canvas.isEnabled()
+        assert not window.capture.options_scroll.isEnabled()
+        assert not window.capture.mode_combo.isEnabled()
+        assert not window.capture.shoot.isEnabled()
+        assert not window.navigationInterface.isEnabled()
+        release.set()
+        pump(qt_app, lambda: not window.runner.busy)
+        assert not window.capture.camera.saving_photo
+        assert window.capture.options_scroll.isEnabled()
+        assert window.capture.mode_combo.isEnabled()
+        assert window.navigationInterface.isEnabled()
+        assert completed == ([] if fail else ["saved"])
+        assert errors == (["图片写入失败"] if fail else [])
+    finally:
+        release.set()
+        pump(qt_app, lambda: not window.runner.busy)
+        window.close()
+        qt_app.processEvents()
 
 
 def test_unified_library_filters_actions_and_capture_context(qt_app, tmp_path, monkeypatch):

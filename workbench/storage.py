@@ -326,7 +326,7 @@ class Workspace:
             regions=regions,
         )
 
-    def _processing(self, image, regions, destination, relative, template, version=1):
+    def _processing(self, image, regions, destination, relative, template, version=1, *, compress_level=6):
         regions = check_regions(regions, *image.size)
         crops = []
         directory = destination / f"v{version}"
@@ -334,7 +334,7 @@ class Workspace:
         for index, region in enumerate(regions):
             name = f"{index + 1:03}.png"
             x, y, w, h = (region[k] for k in ("x", "y", "w", "h"))
-            image.crop((x, y, x + w, y + h)).save(directory / name, "PNG")
+            image.crop((x, y, x + w, y + h)).save(directory / name, "PNG", compress_level=compress_level)
             crops.append(dict(region=region, path=f"{relative}/v{version}/{name}"))
         return dict(version=version, created_at=now(), template=template, crops=crops)
 
@@ -351,6 +351,7 @@ class Workspace:
         camera=None,
         regions=None,
         template=None,
+        png_compress_level=6,
     ):
         with self._write_lock:
             with self.connect() as db:
@@ -370,10 +371,14 @@ class Workspace:
                         image = ImageOps.exif_transpose(opened).convert("RGB")
                 if image.width * image.height > IMAGE_LIMIT:
                     raise ValueError("图像超过一亿像素")
-                image.save(staging / "original.png", "PNG")
+                image.save(staging / "original.png", "PNG", compress_level=png_compress_level)
                 history = []
                 if regions:
-                    history.append(self._processing(image, regions, staging, relative, template))
+                    history.append(
+                        self._processing(
+                            image, regions, staging, relative, template, compress_level=png_compress_level
+                        )
+                    )
                 metadata = dict(
                     custom=custom or {},
                     camera=camera or {},
