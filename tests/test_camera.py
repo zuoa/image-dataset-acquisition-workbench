@@ -35,7 +35,10 @@ def test_frame_conversion_preserves_original_pixels_and_presentation(qt_app):
     ]
 
 
-def test_slow_conversion_keeps_gui_responsive_and_discards_disconnected_result(qt_app, monkeypatch):
+@pytest.mark.parametrize("conversion_error", [False, True])
+def test_slow_conversion_keeps_gui_responsive_and_discards_disconnected_result(
+    qt_app, monkeypatch, conversion_error
+):
     controller = camera.CameraController()
     image = QImage(30, 20, QImage.Format.Format_RGB32)
     image.fill(QColor("red"))
@@ -44,6 +47,7 @@ def test_slow_conversion_keeps_gui_responsive_and_discards_disconnected_result(q
     release = threading.Event()
     threads = []
     delivered = []
+    errors = []
     ticks = []
     original = camera._convert_frame
 
@@ -51,10 +55,13 @@ def test_slow_conversion_keeps_gui_responsive_and_discards_disconnected_result(q
         threads.append(threading.get_ident())
         entered.set()
         assert release.wait(5)
+        if conversion_error:
+            raise RuntimeError("Previous connection failed during conversion")
         return original(frame)
 
     monkeypatch.setattr(camera, "_convert_frame", slow_conversion)
     controller.frame.connect(delivered.append)
+    controller.status.connect(errors.append)
     try:
         controller._pending_frame = (native_frame, time.monotonic())
         controller._process_frame()
@@ -70,9 +77,11 @@ def test_slow_conversion_keeps_gui_responsive_and_discards_disconnected_result(q
         release.set()
         pump(qt_app, lambda: controller._frame_job is None)
         assert not delivered
+        assert not errors
         with pytest.raises(ValueError, match="暂无可采集"):
             controller.snapshot()
 
+        monkeypatch.setattr(camera, "_convert_frame", original)
         controller._pending_frame = (native_frame, time.monotonic())
         controller._process_frame()
         pump(qt_app, lambda: bool(delivered))

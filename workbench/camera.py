@@ -63,6 +63,7 @@ class CameraController(QObject):
         self.frame_pool = QThreadPool(self)
         self.frame_pool.setMaxThreadCount(1)
         self._frame_job = None
+        self._frame_job_generation = None
         self._pending_frame = None
         self._stream_generation = 0
         self.frame_timer = QTimer(self)
@@ -184,8 +185,9 @@ class CameraController(QObject):
         self._pending_frame = None
         generation = self._stream_generation
         self._frame_job = Job(lambda cancel, progress: (generation, received_at, _convert_frame(frame)))
+        self._frame_job_generation = generation
         self._frame_job.signals.succeeded.connect(self._frame_ready)
-        self._frame_job.signals.failed.connect(self._error)
+        self._frame_job.signals.failed.connect(self._frame_failed)
         self._frame_job.signals.finished.connect(self._frame_finished)
         self.frame_pool.start(self._frame_job)
 
@@ -198,9 +200,15 @@ class CameraController(QObject):
         self.frame_at = received_at
         self.frame.emit(image)
 
+    @Slot(str)
+    def _frame_failed(self, message):
+        if self._frame_job_generation == self._stream_generation:
+            self._error(message)
+
     @Slot()
     def _frame_finished(self):
         self._frame_job = None
+        self._frame_job_generation = None
 
     def _check_stream(self):
         if self.camera and self.camera.isActive() and self.frame_at and time.monotonic() - self.frame_at > 4:
