@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import secrets
 import shutil
 import sqlite3
 import threading
@@ -30,6 +31,17 @@ def now() -> str:
 
 def uid() -> str:
     return uuid.uuid4().hex
+
+
+def image_filename() -> str:
+    return f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{secrets.randbelow(1_000_000):06d}.png"
+
+
+def photo_preview(photo) -> str:
+    history = json.loads(photo["processing"])
+    if history and history[-1]["crops"]:
+        return history[-1]["crops"][0]["path"]
+    return photo["original"]
 
 
 def dump(value) -> str:
@@ -218,7 +230,7 @@ class Workspace:
 
     def datasets(self, include_archived=True):
         with self.connect() as db:
-            return [
+            datasets = [
                 dict(r)
                 for r in db.execute(
                     """
@@ -226,15 +238,22 @@ class Workspace:
                 WHERE v.dataset_id=d.id AND v.deleted_at IS NULL AND b.deleted_at IS NULL) AS video_count,
                 (SELECT COUNT(*) FROM photos p JOIN batches b ON b.id=p.batch_id
                 WHERE p.dataset_id=d.id AND p.deleted_at IS NULL AND b.deleted_at IS NULL) AS count,
-                (SELECT p.original FROM photos p JOIN batches b ON b.id=p.batch_id
+                cover.original AS cover, cover.processing AS cover_processing
+                FROM datasets d LEFT JOIN photos cover ON cover.id=(
+                SELECT p.id FROM photos p JOIN batches b ON b.id=p.batch_id
                 WHERE p.dataset_id=d.id AND p.deleted_at IS NULL AND b.deleted_at IS NULL
-                ORDER BY p.created_at DESC LIMIT 1) AS cover
-                FROM datasets d WHERE d.deleted_at IS NULL AND (? OR d.archived=0)
+                ORDER BY p.created_at DESC,p.rowid DESC LIMIT 1)
+                WHERE d.deleted_at IS NULL AND (? OR d.archived=0)
                 ORDER BY d.created_at DESC
             """,
                     (int(include_archived),),
                 )
             ]
+        for dataset in datasets:
+            processing = dataset.pop("cover_processing")
+            if dataset["cover"]:
+                dataset["cover"] = photo_preview(dict(original=dataset["cover"], processing=processing))
+        return datasets
 
     def save_dataset(self, name, description="", tags="", dataset_id=None):
         name = check_name(name)
@@ -331,8 +350,8 @@ class Workspace:
         crops = []
         directory = destination / f"v{version}"
         directory.mkdir()
-        for index, region in enumerate(regions):
-            name = f"{index + 1:03}.png"
+        for region in regions:
+            name = image_filename()
             x, y, w, h = (region[k] for k in ("x", "y", "w", "h"))
             image.crop((x, y, x + w, y + h)).save(directory / name, "PNG", compress_level=compress_level)
             crops.append(dict(region=region, path=f"{relative}/v{version}/{name}"))
@@ -371,7 +390,8 @@ class Workspace:
                         image = ImageOps.exif_transpose(opened).convert("RGB")
                 if image.width * image.height > IMAGE_LIMIT:
                     raise ValueError("图像超过一亿像素")
-                image.save(staging / "original.png", "PNG", compress_level=png_compress_level)
+                original_name = image_filename()
+                image.save(staging / original_name, "PNG", compress_level=png_compress_level)
                 history = []
                 if regions:
                     history.append(
@@ -401,7 +421,7 @@ class Workspace:
                             dump(metadata),
                             image.width,
                             image.height,
-                            f"{relative}/original.png",
+                            f"{relative}/{original_name}",
                             dump(history),
                         ),
                     )
@@ -439,7 +459,7 @@ class Workspace:
                 for r in db.execute(
                     "SELECT p.*,b.name AS batch_name,d.name AS dataset_name "
                     + sql
-                    + " ORDER BY p.created_at DESC,p.id DESC LIMIT ? OFFSET ?",
+                    + " ORDER BY p.created_at DESC,p.rowid DESC LIMIT ? OFFSET ?",
                     [*args, limit, offset],
                 )
             ]
@@ -455,7 +475,7 @@ class Workspace:
         sql, args = self._query(**filters)
         fields = (
             "p.id,p.dataset_id,p.batch_id,p.created_at,p.sample_id,p.tags,p.note,"
-            "p.metadata,p.original,b.name AS batch_name,d.name AS dataset_name"
+            "p.metadata,p.original,b.name AS batch_name,d.name AS dataset_name,p.rowid AS capture_order"
         )
         queries, parameters = [], []
         if media_type in {"all", "photo"}:
@@ -478,7 +498,8 @@ class Workspace:
             return [
                 dict(row)
                 for row in db.execute(
-                    f"SELECT * FROM ({sql}) ORDER BY created_at DESC,id DESC,media_type LIMIT ? OFFSET ?",
+                    f"SELECT * FROM ({sql}) "
+                    "ORDER BY created_at DESC,capture_order DESC,id DESC,media_type LIMIT ? OFFSET ?",
                     [*args, limit, offset],
                 )
             ]
@@ -697,8 +718,8 @@ class Workspace:
                             data = self.path(path).read_bytes()
                             parts = path.split("/")
                             export_path = (
-                                ("originals/" + parts[1] + ".png")
-                                if parts[-1] == "original.png"
+                                ("originals/" + "/".join(parts[1:]))
+                                if path == photo["original"]
                                 else "crops/" + "/".join(parts[1:])
                             )
                             archive.writestr(export_path, data)

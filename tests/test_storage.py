@@ -1,7 +1,10 @@
 import hashlib
 import json
+import re
 import threading
 import zipfile
+from datetime import datetime
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -43,6 +46,53 @@ def test_capture_is_lossless_and_crop_coordinates_match(archive):
     assert crop.size == (30, 20)
     assert crop.getpixel((0, 0)) == (220, 50, 30)
     assert original.getpixel((0, 0)) == (30, 90, 160)
+
+
+def test_image_names_survive_capture_import_reprocessing_and_export(archive, tmp_path):
+    workspace, dataset, batch, template, photo_id = archive
+    source = tmp_path / "外部图片.jpg"
+    Image.new("RGB", (120, 80), "teal").save(source)
+    workspace.add_photo(source, dataset, batch, regions=template["regions"])
+    workspace.reprocess(photo_id, template)
+    paths = []
+    for photo in workspace.photos():
+        paths.append(photo["original"])
+        paths.extend(c["path"] for p in json.loads(photo["processing"]) for c in p["crops"])
+    names = [Path(path).name for path in paths]
+    assert len(names) == len(set(names)) == 5
+    for name in names:
+        assert re.fullmatch(r"\d{8}_\d{6}_\d{6}_\d{6}\.png", name)
+        datetime.strptime(name.rsplit("_", 1)[0], "%Y%m%d_%H%M%S_%f")
+
+    destination = tmp_path / "named-images.zip"
+    workspace.export_zip(destination, dataset)
+    with zipfile.ZipFile(destination) as exported:
+        manifest = json.loads(exported.read("manifest.json"))
+        for original, entry in manifest["files"].items():
+            assert Path(entry["path"]).name == Path(original).name
+            assert entry["path"].startswith(
+                "originals/" if original in {photo["original"] for photo in workspace.photos()} else "crops/"
+            )
+    restored = workspace.import_zip(destination)
+    assert {Path(photo["original"]).name for photo in workspace.photos(dataset_id=restored)} == {
+        Path(photo["original"]).name for photo in workspace.photos(dataset_id=dataset)
+    }
+
+
+def test_latest_photo_is_first_even_when_timestamps_match(tmp_path, monkeypatch):
+    workspace = Workspace(tmp_path / "photo-order")
+    dataset = workspace.save_dataset("时间排序")
+    batch = workspace.save_batch(dataset, "同一毫秒")
+    ids = iter(["f" * 32, "a" * 32])
+    monkeypatch.setattr("workbench.storage.uid", lambda: next(ids))
+    older = workspace.add_photo(Image.new("RGB", (12, 8), "red"), dataset, batch)
+    latest = workspace.add_photo(Image.new("RGB", (12, 8), "green"), dataset, batch)
+    with workspace.connect() as db:
+        db.execute("UPDATE photos SET created_at=?", ("2026-10-29T01:02:03.456+00:00",))
+    for query in (workspace.photos, workspace.media):
+        pages = query(dataset_id=dataset, limit=1) + query(dataset_id=dataset, limit=1, offset=1)
+        assert [photo["id"] for photo in pages] == [latest, older]
+    assert workspace.datasets()[0]["cover"] == workspace.photo(latest)["original"]
 
 
 def test_fast_capture_png_preserves_all_original_and_crop_pixels(tmp_path):

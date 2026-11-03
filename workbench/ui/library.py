@@ -29,7 +29,7 @@ from qfluentwidgets import (
     FluentIcon as FIF,
 )
 
-from ..storage import Cancelled
+from ..storage import Cancelled, photo_preview
 from .canvas import ImageCanvas
 from .common import (
     ComboBox,
@@ -42,7 +42,7 @@ from .common import (
     panel,
     video_duration,
 )
-from .models import ROLE, MediaModel, PhotoDelegate
+from .models import ROLE, MediaModel, PhotoDelegate, media_title
 from .theme import BACKGROUND
 
 
@@ -61,7 +61,7 @@ class PhotoDialog(QDialog):
         layout.setSpacing(16)
         header = QHBoxLayout()
         header.setSpacing(12)
-        self.title = SubtitleLabel(photo["sample_id"] or photo["id"][:12].upper())
+        self.title = SubtitleLabel(media_title(photo))
         self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.title.setToolTip(self.title.text())
         self.title.installEventFilter(self)
@@ -74,7 +74,6 @@ class PhotoDialog(QDialog):
             for crop in processing["crops"]:
                 self.choice.addItem(f"处理 v{processing['version']} · {crop['region']['name']}")
                 self.paths.append(crop["path"])
-        self.choice.currentIndexChanged.connect(self.select_image)
         header.addWidget(self.choice)
         reveal = PushButton(FIF.FOLDER, "打开所在文件夹")
         reveal.clicked.connect(
@@ -136,7 +135,10 @@ class PhotoDialog(QDialog):
         splitter.setStretchFactor(1, 0)
         splitter.setSizes([720, 300])
         layout.addWidget(splitter, 1)
-        self.select_image(0)
+        default_index = self.paths.index(photo_preview(photo))
+        self.choice.setCurrentIndex(default_index)
+        self.choice.currentIndexChanged.connect(self.select_image)
+        self.select_image(default_index)
 
     def eventFilter(self, widget, event):
         if widget is self.title and event.type() == QEvent.Type.Resize:
@@ -475,7 +477,7 @@ class LibraryPage(QWidget):
             self.selection_details.setText(f"{photos} 张图片 · {len(items) - photos} 段视频")
         else:
             item = items[0]
-            self.selection_title.setText(item["sample_id"] or item["id"][:12].upper())
+            self.selection_title.setText(media_title(item))
             dimensions = (
                 f"视频 · {video_duration(item['duration_ms'])}"
                 if item["media_type"] == "video"

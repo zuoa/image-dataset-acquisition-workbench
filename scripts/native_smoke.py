@@ -60,7 +60,10 @@ def populate():
         "番茄表面 · 实验归档", "不同光照条件下的表面图像采集与记录。", "番茄,自然光"
     )
     batch = workspace.save_batch(first, "自然光 · 第一批", {"note": "室温 25°C", "custom": {"温度": "25°C"}})
-    workspace.add_photo(Image.new("RGB", (120, 80), "teal"), first, batch, sample_id="P-001")
+    image = Image.new("RGB", (120, 80), "teal")
+    image.paste("#F4C86A", (25, 20, 65, 60))
+    image.paste("#D46754", (35, 30, 55, 50))
+    workspace.add_photo(image, first, batch, regions=[dict(name="中心热区", x=20, y=15, w=50, h=50)])
     source = workspace.new_recording_path()
     # Opaque archive fixture for browsing only; this script never opens a player.
     source.write_bytes(b"native media library archive fixture")

@@ -1,5 +1,6 @@
 """Paged media models with bounded, asynchronous photo thumbnail caching."""
 
+import hashlib
 from collections import OrderedDict
 from pathlib import Path
 
@@ -20,9 +21,18 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate
 from qfluentwidgets import FluentIcon as FIF
 
+from ..storage import photo_preview
 from .common import video_duration
 
 ROLE = Qt.ItemDataRole.UserRole + 1
+
+
+def media_title(row):
+    if row["sample_id"]:
+        return row["sample_id"]
+    if row.get("media_type") == "video" or Path(row["original"]).stem == "original":
+        return row["id"][:10].upper()
+    return Path(row["original"]).stem
 
 
 class ThumbnailSignals(QObject):
@@ -36,7 +46,8 @@ class ThumbnailJob(QRunnable):
 
     def run(self):
         try:
-            target = self.cache / (self.path.parent.name + ".jpg")
+            cache_key = hashlib.sha256(str(self.path).encode("utf-8")).hexdigest()
+            target = self.cache / (cache_key + ".jpg")
             if not target.exists():
                 with Image.open(self.path) as image:
                     thumb = ImageOps.fit(image.convert("RGB"), (440, 300))
@@ -101,11 +112,13 @@ class PhotoModel(QAbstractListModel):
         if role == ROLE:
             return row
         if role == Qt.ItemDataRole.DisplayRole:
-            return row["sample_id"] or row["id"][:10].upper()
+            return media_title(row)
         if role == Qt.ItemDataRole.ToolTipRole:
-            return f"{row['sample_id'] or row['id']}\n{row['batch_name']} · {row['width']} × {row['height']}\n{row['note']}"
+            return (
+                f"{media_title(row)}\n{row['batch_name']} · {row['width']} × {row['height']}\n{row['note']}"
+            )
         if role == Qt.ItemDataRole.DecorationRole:
-            path = str(self.workspace.path(row["original"]))
+            path = str(self.workspace.path(photo_preview(row)))
             if path in self.cache:
                 self.cache.move_to_end(path)
                 return self.cache[path]
@@ -123,7 +136,7 @@ class PhotoModel(QAbstractListModel):
         while len(self.cache) > 160:
             self.cache.popitem(last=False)
         for i, row in enumerate(self.rows):
-            if str(self.workspace.path(row["original"])) == path:
+            if row.get("media_type") != "video" and str(self.workspace.path(photo_preview(row))) == path:
                 self.dataChanged.emit(self.index(i), self.index(i), [Qt.ItemDataRole.DecorationRole])
 
 
@@ -202,7 +215,7 @@ class PhotoDelegate(QStyledItemDelegate):
             font.setWeight(QFont.Weight.Medium)
             painter.setFont(font)
             painter.setPen(QColor("#182532"))
-            title = row["sample_id"] or row["id"][:10].upper()
+            title = media_title(row)
             text_rect = rect.adjusted(12, rect.height() - (33 if self.compact else 59), -12, 0)
             painter.drawText(
                 text_rect,

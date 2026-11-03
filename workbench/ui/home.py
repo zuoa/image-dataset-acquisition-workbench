@@ -16,7 +16,7 @@ from qfluentwidgets import BodyLabel, LineEdit, PrimaryPushButton, PushButton, S
 from qfluentwidgets import FluentIcon as FIF
 
 from .common import FormDialog, confirm, heading, menu_button, muted
-from .models import ROLE, MediaModel
+from .models import ROLE, MediaModel, media_title
 from .theme import INK, TONES, MetricCard, SoftCard
 from .typography import interface_font
 
@@ -60,7 +60,7 @@ class RecentDelegate(QStyledItemDelegate):
         painter.setFont(interface_font(16))
         painter.setPen(QColor(INK))
         width = max(20, round(rect.width() - 62))
-        title = row["sample_id"] or row["id"][:8].upper()
+        title = media_title(row)
         painter.drawText(
             QRectF(rect.x() + 62, rect.y() + 13, width, 24),
             painter.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, width),
