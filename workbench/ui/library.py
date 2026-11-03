@@ -30,6 +30,7 @@ from qfluentwidgets import (
 )
 
 from ..storage import Cancelled, photo_preview
+from ..timeutils import display_now, format_datetime
 from .canvas import ImageCanvas
 from .common import (
     ComboBox,
@@ -105,7 +106,7 @@ class PhotoDialog(QDialog):
             group.addWidget(text)
             dl.addLayout(group)
 
-        created = photo["created_at"][:19].replace("T", " ") + " UTC"
+        created = format_datetime(photo["created_at"])
         field(None, f"{photo['width']} × {photo['height']}\n{created}")
         field("标签", photo["tags"])
         field("备注", photo["note"])
@@ -118,7 +119,7 @@ class PhotoDialog(QDialog):
         for processing in history:
             template = processing.get("template") or {}
             lines.append(f"\n处理 v{processing['version']} · {template.get('name', '手动热区')}")
-            lines.append(processing["created_at"][:19].replace("T", " ") + " UTC")
+            lines.append(format_datetime(processing["created_at"]))
             lines.extend(
                 f"{c['region']['name']}：{c['region']['w']} × {c['region']['h']}" for c in processing["crops"]
             )
@@ -193,7 +194,7 @@ class ImportImagesDialog(FormDialog):
         self.batch_combo.setAccessibleName("导入到批次")
         form.addRow(BodyLabel("批次"), self.batch_combo)
         self.batch_name = LineEdit()
-        self.batch_name.setText("图片导入 · " + datetime.now().strftime("%Y-%m-%d"))
+        self.batch_name.setText("图片导入 · " + display_now().strftime("%Y-%m-%d"))
         self.batch_name_label = BodyLabel("批次名称")
         form.addRow(self.batch_name_label, self.batch_name)
         self.viewLayout.insertLayout(2, form)
@@ -485,7 +486,7 @@ class LibraryPage(QWidget):
             )
             custom = json.loads(item["metadata"]).get("custom", {})
             self.selection_details.setText(
-                f"{dimensions}\n{item['batch_name']}\n{item['created_at'][:19].replace('T', ' ')} UTC"
+                f"{dimensions}\n{item['batch_name']}\n{format_datetime(item['created_at'])}"
                 f"\n\n{item['tags']}\n{item['note']}\n"
                 + "\n".join(f"{key}：{value}" for key, value in custom.items())
             )

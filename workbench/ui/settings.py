@@ -16,6 +16,7 @@ from qfluentwidgets import (
 )
 
 from .. import __version__
+from ..timeutils import display_now, format_datetime
 from .common import confirm, heading, muted, panel
 from .theme import BLUE, INK
 
@@ -67,7 +68,7 @@ class TrashPage(QWidget):
         labels = {"dataset": "数据集", "batch": "批次", "photo": "图片", "video": "视频"}
         for item in self.items:
             self.list.addItem(
-                f"{labels[item['kind']]}    {item['name'] or item['id'][:12]}    ·    {item['deleted_at'][:19].replace('T', ' ')} UTC"
+                f"{labels[item['kind']]}    {item['name'] or item['id'][:12]}    ·    {format_datetime(item['deleted_at'])}"
             )
         self.summary.setText(f"{len(self.items)} 条删除记录" if self.items else "回收站为空")
 
@@ -197,9 +198,7 @@ class SettingsPage(QWidget):
         parent = QFileDialog.getExistingDirectory(self, "选择恢复位置（会创建新的工作区目录）")
         if not parent:
             return
-        from datetime import datetime
-
-        destination = Path(parent) / datetime.now().strftime("Vannus-恢复-%Y%m%d-%H%M%S")
+        destination = Path(parent) / display_now().strftime("Vannus-恢复-%Y%m%d-%H%M%S")
 
         def done(_):
             self.app.preferences.setValue("workspace", str(destination))

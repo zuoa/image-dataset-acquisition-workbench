@@ -1,5 +1,13 @@
 # 验证记录
 
+## 东八区时间显示（2026-11-03）
+
+- 首页最近采集、素材库图片与视频信息、图片详情及处理历史、回收站删除时间统一转换为 UTC+08:00。使用固定东八区，不依赖操作系统时区；详情及回收站显式标注时区。
+- 「今日新增」按东八区零点统计；新图片文件名、默认采集及导入批次名称、恢复目录名称采用东八区时间。归档时间继续采用 UTC，读取旧记录时转换显示，无时区的旧时间按 UTC 解释。
+- `TZ=UTC uv run pytest -q`：**62 passed**。新增覆盖不同 ISO 时区偏移、跨月、跨年及无偏移时间，以及真实 Qt 窗口中的图片与视频时间、处理历史、回收站和东八区零点前后统计。Ruff 检查、格式检查及 `git diff --check` 通过。
+- `TZ=UTC uv run python scripts/native_smoke.py` 通过；复核 `build/screenshots/17-photo-detail-minimum.png`、`09-library-video.png`、`22-trash-minimum.png`，确认时区文字完整、布局正常。使用临时工作区及隔离 INI 偏好，未开启相机，未使用模拟器或 offscreen 后端。
+- 已重新生成 `dist/Vannus.app`，`codesign --verify --deep --strict` 通过。以 UTC 进程时区及临时工作区启动应用包，确认创建原生窗口，结果为 `build/bundle-timezone-verification.json`；检查后以 SIGTERM 退出，避免保存测试窗口尺寸到用户偏好。
+
 ## 图片命名、排序与热区默认预览（2026-10-29）
 
 - 新采集、普通图片导入及重新裁剪生成的 PNG 以本机时间（含微秒）加六位随机数命名；内部图片编号保持独立。未填写样本编号时，列表、最近采集和详情显示图片文件名。ZIP 原图与裁剪图保留文件名，完整导出再导入继续保留名称与处理历史。

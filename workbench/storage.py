@@ -20,6 +20,8 @@ from typing import Callable
 
 from PIL import Image, ImageOps
 
+from .timeutils import display_now
+
 SCHEMA_VERSION = 2
 IMAGE_LIMIT = 100_000_000
 Image.MAX_IMAGE_PIXELS = IMAGE_LIMIT
@@ -34,7 +36,7 @@ def uid() -> str:
 
 
 def image_filename() -> str:
-    return f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{secrets.randbelow(1_000_000):06d}.png"
+    return f"{display_now().strftime('%Y%m%d_%H%M%S_%f')}_{secrets.randbelow(1_000_000):06d}.png"
 
 
 def photo_preview(photo) -> str:

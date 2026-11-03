@@ -1,5 +1,5 @@
 import shutil
-from datetime import datetime, timezone
+from datetime import timezone
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import BodyLabel, LineEdit, PrimaryPushButton, PushButton, ScrollArea, SubtitleLabel
 from qfluentwidgets import FluentIcon as FIF
 
+from ..timeutils import display_now, format_datetime
 from .common import FormDialog, confirm, heading, menu_button, muted
 from .models import ROLE, MediaModel, media_title
 from .theme import INK, TONES, MetricCard, SoftCard
@@ -67,7 +68,7 @@ class RecentDelegate(QStyledItemDelegate):
         )
         painter.setFont(interface_font(13))
         painter.setPen(QColor("#9CA1B4"))
-        date = datetime.fromisoformat(row["created_at"]).astimezone().strftime("%m/%d %H:%M")
+        date = format_datetime(row["created_at"], "%m/%d %H:%M")
         text = f"{row['dataset_name']} · {date}"
         painter.drawText(
             QRectF(rect.x() + 62, rect.y() + 40, width, 22),
@@ -224,7 +225,7 @@ class HomePage(QWidget):
     def refresh(self):
         datasets = self.app.workspace.datasets()
         total = sum(data["count"] for data in datasets)
-        midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        midnight = display_now().replace(hour=0, minute=0, second=0, microsecond=0)
         today = self.app.workspace.count_photos(date_from=midnight.astimezone(timezone.utc).isoformat())
         values = [len(datasets), total, today, sum(bool(d["archived"]) for d in datasets)]
         for card, value in zip(self.metrics, values):

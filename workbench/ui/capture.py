@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import shutil
-from datetime import datetime
 from pathlib import Path
 
 from PIL import Image
@@ -24,6 +23,7 @@ from qfluentwidgets import (
 )
 
 from ..camera import CameraController
+from ..timeutils import display_now
 from .canvas import ImageCanvas
 from .common import (
     ComboBox,
@@ -486,7 +486,7 @@ class CapturePage(QWidget):
                 metadata=dict(
                     custom=self.custom.value(),
                     camera=self.camera.metadata(),
-                    started_at=datetime.now().astimezone().isoformat(),
+                    started_at=display_now().isoformat(),
                 ),
             )
             path = self.app.workspace.new_recording_path()
@@ -534,7 +534,7 @@ class CapturePage(QWidget):
         self.app.notify("录制失败：" + message, error=True)
 
     def _batch_dialog(self, data=None):
-        values = dict(name=data["name"] if data else datetime.now().strftime("采集 %m-%d %H:%M"))
+        values = dict(name=data["name"] if data else display_now().strftime("采集 %m-%d %H:%M"))
         if data:
             defaults = json.loads(data["defaults"])
             values.update(defaults)
