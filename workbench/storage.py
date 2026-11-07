@@ -133,6 +133,7 @@ class Workspace:
             """)
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.recover()
+        self._flatten_legacy_images()
 
     @contextmanager
     def connect(self):
@@ -152,22 +153,91 @@ class Workspace:
             raise ValueError("文件路径超出工作区")
         return result
 
+    def _image_name(self, name: str, photo_id: str, reserved=()) -> str:
+        """Keep capture names readable while avoiding collisions in the shared image directory."""
+        stem, suffix = Path(name).stem, Path(name).suffix
+        candidate = name
+        if candidate in reserved or (self.root / "images" / candidate).exists():
+            candidate = f"{stem}_{photo_id}{suffix}"
+        counter = 2
+        while candidate in reserved or (self.root / "images" / candidate).exists():
+            candidate = f"{stem}_{photo_id}_{counter}{suffix}"
+            counter += 1
+        return candidate
+
+    @staticmethod
+    def _photo_paths(photo):
+        return [photo["original"], *(
+            crop["path"] for version in json.loads(photo["processing"]) for crop in version["crops"]
+        )]
+
     def recover(self):
         # Only called at startup, after acquiring the workspace's process lock.
         with self.connect() as db:
-            live = {r[0] for r in db.execute("SELECT id FROM photos")}
+            photos = list(db.execute("SELECT original,processing FROM photos"))
             live_videos = {r[0] for r in db.execute("SELECT original FROM videos")}
+        live_images = {path for photo in photos for path in self._photo_paths(photo)}
+        live_folders = {
+            PurePosixPath(path).parts[1] for path in live_images if len(PurePosixPath(path).parts) > 2
+        }
         for p in (self.root / ".staging").iterdir():
             if p.is_dir():
                 shutil.rmtree(p)
             else:
                 p.unlink()
         for p in (self.root / "images").iterdir():
-            if p.is_dir() and p.name not in live:
+            if p.is_dir() and p.name not in live_folders:
                 shutil.rmtree(p)
+            elif p.is_file() and p.suffix == ".png" and p.relative_to(self.root).as_posix() not in live_images:
+                p.unlink()
         for p in (self.root / "videos").glob("*.mp4"):
             if p.relative_to(self.root).as_posix() not in live_videos:
                 p.unlink()
+
+    def _flatten_legacy_images(self):
+        with self._write_lock, self.connect() as db:
+            photos = list(db.execute("SELECT id,original,processing FROM photos"))
+        for photo in photos:
+            old_folder = self.root / "images" / photo["id"]
+            if not photo["original"].startswith(f"images/{photo['id']}/"):
+                continue
+            history = json.loads(photo["processing"])
+            original_name = self._image_name(Path(photo["original"]).name, photo["id"])
+            names = [original_name]
+            mapping = {photo["original"]: f"images/{original_name}"}
+            for version in history:
+                for index, crop in enumerate(version["crops"], 1):
+                    name = self._image_name(
+                        f"{Path(original_name).stem}_v{version['version']}_{index:02d}.png",
+                        photo["id"], names,
+                    )
+                    names.append(name)
+                    mapping[crop["path"]] = f"images/{name}"
+            created = []
+            try:
+                for old, new in mapping.items():
+                    source, target = self.path(old), self.path(new)
+                    try:
+                        os.link(source, target)
+                    except OSError:
+                        with source.open("rb") as src, target.open("xb") as dst:
+                            created.append(target)
+                            shutil.copyfileobj(src, dst)
+                    else:
+                        created.append(target)
+                for version in history:
+                    for crop in version["crops"]:
+                        crop["path"] = mapping[crop["path"]]
+                with self.connect() as db:
+                    db.execute(
+                        "UPDATE photos SET original=?,processing=? WHERE id=?",
+                        (mapping[photo["original"]], dump(history), photo["id"]),
+                    )
+            except BaseException:
+                for target in created:
+                    target.unlink(missing_ok=True)
+                raise
+            shutil.rmtree(old_folder)
 
     def new_recording_path(self):
         folder = self.root / ".staging" / uid()
@@ -347,16 +417,17 @@ class Workspace:
             regions=regions,
         )
 
-    def _processing(self, image, regions, destination, relative, template, version=1, *, compress_level=6):
+    def _processing(self, image, regions, destination, original_name, template, version=1, *, compress_level=6):
         regions = check_regions(regions, *image.size)
         crops = []
-        directory = destination / f"v{version}"
-        directory.mkdir()
-        for region in regions:
-            name = image_filename()
+        for index, region in enumerate(regions, 1):
+            name = self._image_name(
+                f"{Path(original_name).stem}_v{version}_{index:02d}.png", "crop",
+                [Path(crop["path"]).name for crop in crops],
+            )
             x, y, w, h = (region[k] for k in ("x", "y", "w", "h"))
-            image.crop((x, y, x + w, y + h)).save(directory / name, "PNG", compress_level=compress_level)
-            crops.append(dict(region=region, path=f"{relative}/v{version}/{name}"))
+            image.crop((x, y, x + w, y + h)).save(destination / name, "PNG", compress_level=compress_level)
+            crops.append(dict(region=region, path=f"images/{name}"))
         return dict(version=version, created_at=now(), template=template, crops=crops)
 
     def add_photo(
@@ -380,10 +451,9 @@ class Workspace:
             if shutil.disk_usage(self.root).free < 100 * 1024 * 1024:
                 raise OSError("工作区剩余空间不足 100 MB，请清理磁盘")
             photo_id = uid()
-            relative = f"images/{photo_id}"
             staging = self.root / ".staging" / photo_id
-            final = self.root / relative
             staging.mkdir()
+            moved = []
             try:
                 if isinstance(source, Image.Image):
                     image = ImageOps.exif_transpose(source).convert("RGB")
@@ -392,13 +462,13 @@ class Workspace:
                         image = ImageOps.exif_transpose(opened).convert("RGB")
                 if image.width * image.height > IMAGE_LIMIT:
                     raise ValueError("图像超过一亿像素")
-                original_name = image_filename()
+                original_name = self._image_name(image_filename(), photo_id)
                 image.save(staging / original_name, "PNG", compress_level=png_compress_level)
                 history = []
                 if regions:
                     history.append(
                         self._processing(
-                            image, regions, staging, relative, template, compress_level=png_compress_level
+                            image, regions, staging, original_name, template, compress_level=png_compress_level
                         )
                     )
                 metadata = dict(
@@ -408,7 +478,12 @@ class Workspace:
                 )
                 with self.connect() as db:
                     self._active_batch(db, dataset_id, batch_id)
-                    os.replace(staging, final)
+                    for path in [f"images/{original_name}", *(
+                        crop["path"] for version in history for crop in version["crops"]
+                    )]:
+                        final = self.path(path)
+                        os.replace(staging / final.name, final)
+                        moved.append(final)
                     db.execute(
                         """INSERT INTO photos(id,dataset_id,batch_id,created_at,sample_id,tags,note,
                         metadata,width,height,original,processing) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -423,15 +498,17 @@ class Workspace:
                             dump(metadata),
                             image.width,
                             image.height,
-                            f"{relative}/{original_name}",
+                            f"images/{original_name}",
                             dump(history),
                         ),
                     )
                 return photo_id
             except BaseException:
-                shutil.rmtree(staging, ignore_errors=True)
-                shutil.rmtree(final, ignore_errors=True)
+                for path in moved:
+                    path.unlink(missing_ok=True)
                 raise
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
 
     @staticmethod
     def _query(dataset_id=None, batch_id=None, search="", date_from="", date_to=""):
@@ -558,21 +635,22 @@ class Workspace:
             version = max((p["version"] for p in history), default=0) + 1
             staging = self.root / ".staging" / uid()
             staging.mkdir()
-            relative = f"images/{photo_id}"
-            final = self.path(f"{relative}/v{version}")
+            moved = []
             try:
                 with Image.open(self.path(photo["original"])) as image:
                     processing = self._processing(
-                        image, template["regions"], staging, relative, template, version
+                        image, template["regions"], staging, Path(photo["original"]).name, template, version
                     )
-                # An interrupted reprocess may have left an uncommitted version directory.
-                shutil.rmtree(final, ignore_errors=True)
-                os.replace(staging / f"v{version}", final)
+                for crop in processing["crops"]:
+                    final = self.path(crop["path"])
+                    os.replace(staging / final.name, final)
+                    moved.append(final)
                 history.append(processing)
                 with self.connect() as db:
                     db.execute("UPDATE photos SET processing=? WHERE id=?", (dump(history), photo_id))
             except BaseException:
-                shutil.rmtree(final, ignore_errors=True)
+                for path in moved:
+                    path.unlink(missing_ok=True)
                 raise
             finally:
                 shutil.rmtree(staging, ignore_errors=True)
@@ -618,13 +696,12 @@ class Workspace:
 
     def empty_trash(self):
         with self._write_lock, self.connect() as db:
-            ids = [
-                r[0]
-                for r in db.execute("""SELECT p.id FROM photos p JOIN datasets d ON d.id=p.dataset_id
+            photos = list(
+                db.execute("""SELECT p.id,p.original,p.processing FROM photos p JOIN datasets d ON d.id=p.dataset_id
                 JOIN batches b ON b.id=p.batch_id WHERE p.deleted_at IS NOT NULL
                 OR d.deleted_at IS NOT NULL OR b.deleted_at IS NOT NULL""")
-            ]
-            db.executemany("DELETE FROM photos WHERE id=?", [(i,) for i in ids])
+            )
+            db.executemany("DELETE FROM photos WHERE id=?", [(photo["id"],) for photo in photos])
             videos = list(
                 db.execute("""SELECT p.id,p.original FROM videos p
                 JOIN datasets d ON d.id=p.dataset_id JOIN batches b ON b.id=p.batch_id
@@ -638,8 +715,10 @@ class Workspace:
                 "DELETE FROM batches WHERE deleted_at IS NOT NULL OR dataset_id IN (SELECT id FROM datasets WHERE deleted_at IS NOT NULL)"
             )
             db.execute("DELETE FROM datasets WHERE deleted_at IS NOT NULL")
-        for i in ids:
-            shutil.rmtree(self.root / "images" / i, ignore_errors=True)
+        for photo in photos:
+            for path in self._photo_paths(photo):
+                self.path(path).unlink(missing_ok=True)
+            shutil.rmtree(self.root / "images" / photo["id"], ignore_errors=True)
         for video in videos:
             self.path(video["original"]).unlink(missing_ok=True)
 
@@ -795,6 +874,8 @@ class Workspace:
                 if len(batch_ids) != len(manifest["batches"]):
                     raise ValueError("批次编号重复")
                 records = []
+                image_moves = []
+                planned_names = set()
                 video_records = []
                 video_ids = set()
                 total = len(manifest["photos"]) + len(manifest.get("videos", []))
@@ -811,9 +892,24 @@ class Workspace:
                     history = json.loads(photo["processing"])
                     paths = [photo["original"]] + [c["path"] for p in history for c in p["crops"]]
                     mapping = {}
+                    original_name = self._image_name(Path(photo["original"]).name, photo_id, planned_names)
+                    planned_names.add(original_name)
+                    crop_names = {}
+                    for version in history:
+                        for crop_index, crop in enumerate(version["crops"], 1):
+                            name = self._image_name(
+                                f"{Path(original_name).stem}_v{version['version']}_{crop_index:02d}.png",
+                                photo_id,
+                                planned_names,
+                            )
+                            crop_names[crop["path"]] = name
+                            planned_names.add(name)
                     for old in paths:
                         parts = PurePosixPath(old).parts
-                        if len(parts) < 3 or parts[0] != "images" or parts[1] != photo["id"] or ".." in parts:
+                        legacy = len(parts) >= 3 and parts[1] == photo["id"]
+                        flat = len(parts) == 2
+                        if (parts[0] != "images" or not (legacy or flat) or ".." in parts
+                                or parts[-1] in {"", ".", ".."} or PurePosixPath(old).suffix != ".png"):
                             raise ValueError("图片关联路径不正确")
                         entry = manifest["files"][old]
                         data = archive.read(entry["path"])
@@ -821,10 +917,11 @@ class Workspace:
                             raise ValueError("文件校验失败：" + entry["path"])
                         with Image.open(io.BytesIO(data)) as image:
                             image.verify()
-                        target = folder.joinpath(*parts[2:])
-                        target.parent.mkdir(parents=True, exist_ok=True)
+                        name = original_name if old == photo["original"] else crop_names[old]
+                        target = folder / name
                         target.write_bytes(data)
-                        mapping[old] = f"images/{photo_id}/" + "/".join(parts[2:])
+                        mapping[old] = f"images/{name}"
+                        image_moves.append((target, self.path(mapping[old])))
                     for p in history:
                         for c in p["crops"]:
                             c["path"] = mapping[c["path"]]
@@ -909,9 +1006,10 @@ class Workspace:
                                 t["created_at"],
                             ),
                         )
-                    for record in records:
-                        final = self.root / "images" / record[0]
-                        os.replace(transaction_dir / record[0], final)
+                    for staged, final in image_moves:
+                        if final.exists():
+                            raise ValueError("图片文件名冲突，请重新导入")
+                        os.replace(staged, final)
                         moved.append(final)
                     db.executemany(
                         """INSERT INTO photos(id,dataset_id,batch_id,created_at,sample_id,tags,note,
@@ -929,11 +1027,8 @@ class Workspace:
                     )
             return dataset_id
         except BaseException:
-            for folder in moved:
-                if folder.is_dir():
-                    shutil.rmtree(folder, ignore_errors=True)
-                else:
-                    folder.unlink(missing_ok=True)
+            for path in moved:
+                path.unlink(missing_ok=True)
             raise
         finally:
             shutil.rmtree(transaction_dir, ignore_errors=True)
@@ -1000,7 +1095,7 @@ class Workspace:
                     if p.is_absolute() or ".." in p.parts or "\\" in name or ":" in name:
                         raise ValueError("备份包含不安全路径")
                     if name != "archive.sqlite3" and not (
-                        (len(p.parts) >= 3 and p.parts[0] == "images" and p.suffix == ".png")
+                        (len(p.parts) >= 2 and p.parts[0] == "images" and p.suffix == ".png")
                         or (len(p.parts) == 2 and p.parts[0] == "videos" and p.suffix == ".mp4")
                     ):
                         raise ValueError("备份包含未知文件")

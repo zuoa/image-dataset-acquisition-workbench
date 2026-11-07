@@ -57,10 +57,17 @@ def test_image_names_survive_capture_import_reprocessing_and_export(archive, tmp
     paths = []
     for photo in workspace.photos():
         paths.append(photo["original"])
-        paths.extend(c["path"] for p in json.loads(photo["processing"]) for c in p["crops"])
+        for version in json.loads(photo["processing"]):
+            for index, crop in enumerate(version["crops"], 1):
+                assert Path(crop["path"]).name == (
+                    f"{Path(photo['original']).stem}_v{version['version']}_{index:02d}.png"
+                )
+                paths.append(crop["path"])
     names = [Path(path).name for path in paths]
     assert len(names) == len(set(names)) == 5
-    for name in names:
+    assert all(Path(path).parent.as_posix() == "images" for path in paths)
+    for photo in workspace.photos():
+        name = Path(photo["original"]).name
         assert re.fullmatch(r"\d{8}_\d{6}_\d{6}_\d{6}\.png", name)
         datetime.strptime(name.rsplit("_", 1)[0], "%Y%m%d_%H%M%S_%f")
 
@@ -74,9 +81,9 @@ def test_image_names_survive_capture_import_reprocessing_and_export(archive, tmp
                 "originals/" if original in {photo["original"] for photo in workspace.photos()} else "crops/"
             )
     restored = workspace.import_zip(destination)
-    assert {Path(photo["original"]).name for photo in workspace.photos(dataset_id=restored)} == {
-        Path(photo["original"]).name for photo in workspace.photos(dataset_id=dataset)
-    }
+    assert all(Path(photo["original"]).parent.as_posix() == "images"
+               for photo in workspace.photos(dataset_id=restored))
+    assert not any(path.is_dir() for path in (workspace.root / "images").iterdir())
 
 
 def test_latest_photo_is_first_even_when_timestamps_match(tmp_path, monkeypatch):
@@ -120,12 +127,13 @@ def test_fast_capture_png_preserves_all_original_and_crop_pixels(tmp_path):
 
 def test_invalid_crop_rolls_back_all_files_and_database(archive):
     workspace, dataset, batch, _, _ = archive
+    before = set((workspace.root / "images").iterdir())
     with pytest.raises(ValueError):
         workspace.add_photo(
             Image.new("RGB", (120, 80)), dataset, batch, regions=[dict(name="bad", x=115, y=0, w=30, h=20)]
         )
     assert workspace.count_photos() == 1
-    assert len(list((workspace.root / "images").iterdir())) == 1
+    assert set((workspace.root / "images").iterdir()) == before
     assert not list((workspace.root / ".staging").iterdir())
 
 
@@ -172,6 +180,7 @@ def test_full_export_import_preserves_metadata_and_versions(archive, tmp_path):
 
 def test_corrupt_import_is_atomic(archive, tmp_path):
     workspace, dataset, _, _, _ = archive
+    before = set((workspace.root / "images").iterdir())
     good, bad = tmp_path / "good.zip", tmp_path / "bad.zip"
     workspace.export_zip(good, dataset)
     with zipfile.ZipFile(good) as z, zipfile.ZipFile(bad, "w") as output:
@@ -180,7 +189,7 @@ def test_corrupt_import_is_atomic(archive, tmp_path):
     with pytest.raises(ValueError, match="校验失败"):
         workspace.import_zip(bad)
     assert len(workspace.datasets()) == 1
-    assert len(list((workspace.root / "images").iterdir())) == 1
+    assert set((workspace.root / "images").iterdir()) == before
     assert not list((workspace.root / ".staging").iterdir())
 
 
@@ -256,6 +265,42 @@ def test_workspace_backup_preserves_trash(archive, tmp_path):
     assert other.path(other.photo(photo)["original"]).exists()
 
 
+def test_legacy_image_folders_are_flattened_and_archives_remain_importable(archive, tmp_path):
+    workspace, dataset, _, _, photo_id = archive
+    photo = workspace.photo(photo_id)
+    history = json.loads(photo["processing"])
+    folder = workspace.root / "images" / photo_id
+    folder.mkdir()
+    old_original = f"images/{photo_id}/{Path(photo['original']).name}"
+    workspace.path(photo["original"]).rename(workspace.path(old_original))
+    for version in history:
+        (folder / f"v{version['version']}").mkdir()
+        for crop in version["crops"]:
+            old_crop = f"images/{photo_id}/v{version['version']}/{Path(crop['path']).name}"
+            workspace.path(crop["path"]).rename(workspace.path(old_crop))
+            crop["path"] = old_crop
+    with workspace.connect() as db:
+        db.execute("UPDATE photos SET original=?,processing=? WHERE id=?",
+                   (old_original, json.dumps(history), photo_id))
+    legacy_zip = tmp_path / "legacy.zip"
+    workspace.export_zip(legacy_zip, dataset)
+
+    reopened = Workspace(workspace.root)
+    migrated = reopened.photo(photo_id)
+    assert migrated["original"].startswith("images/")
+    assert Path(migrated["original"]).parent.as_posix() == "images"
+    assert not folder.exists()
+    with Image.open(reopened.path(migrated["original"])) as image:
+        assert image.getpixel((0, 0)) == (30, 90, 160)
+    assert all(Path(path).parent.as_posix() == "images" for path in reopened._photo_paths(migrated))
+
+    imported_dataset = reopened.import_zip(legacy_zip)
+    imported = reopened.photos(dataset_id=imported_dataset)[0]
+    assert all(Path(path).parent.as_posix() == "images" for path in reopened._photo_paths(imported))
+    assert all(reopened.path(path).is_file() for path in reopened._photo_paths(imported))
+    assert not any(path.is_dir() for path in (reopened.root / "images").iterdir())
+
+
 def test_search_literal_and_archived_dataset_write_protection(archive):
     workspace, dataset, batch, _, photo = archive
     workspace.update_photos([photo], tags="100%_safe")
@@ -271,8 +316,10 @@ def test_startup_recovers_orphaned_staging_and_uncommitted_photo(archive):
     workspace, *_ = archive
     (workspace.root / ".staging" / "interrupted").mkdir()
     (workspace.root / "images" / "orphan").mkdir()
+    (workspace.root / "images" / "uncommitted.png").write_bytes(b"partial")
     Workspace(workspace.root)
     assert not (workspace.root / "images" / "orphan").exists()
+    assert not (workspace.root / "images" / "uncommitted.png").exists()
     assert not list((workspace.root / ".staging").iterdir())
     assert workspace.count_photos() == 1
 
