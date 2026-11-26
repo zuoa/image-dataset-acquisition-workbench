@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QImage
 from PySide6.QtMultimedia import QCamera
 from PySide6.QtWidgets import QHBoxLayout, QListWidget, QSplitter, QVBoxLayout, QWidget
@@ -56,6 +56,7 @@ class CapturePage(QWidget):
         self.running = False
         self.pending_shot = False
         self.recording_context = None
+        self._native_exposure = None
         self.countdown_remaining = 0
         self.shot_timer = QTimer(self)
         self.shot_timer.timeout.connect(self.take_photo)
@@ -300,7 +301,8 @@ class CapturePage(QWidget):
         self.camera.preview.connect(self.canvas.set_image)
         self.camera.status.connect(self.camera_status)
         self.camera.connected.connect(self.camera_connected)
-        self.camera.devices_changed.connect(self.refresh_devices)
+        self.camera.devices_changed.connect(self._populate_devices)
+        self.camera.mvs.exposure_changed.connect(self._sync_mvs_exposure)
         self.camera.recording_changed.connect(self.update_capture_controls)
         self.camera.recording_duration.connect(
             lambda duration: self.recording_time.setText("●  " + video_duration(duration))
@@ -434,7 +436,7 @@ class CapturePage(QWidget):
     def update_capture_controls(self):
         busy = self.camera.video_busy
         saving_photo = self.camera.saving_photo
-        active = bool(self.camera.camera and self.camera.camera.isActive())
+        active = self.camera.active
         self.options_scroll.setEnabled(not busy and not saving_photo)
         self.mode_combo.setEnabled(not busy and not saving_photo)
         self.sample.setEnabled(not busy)
@@ -581,6 +583,10 @@ class CapturePage(QWidget):
             self.app.refresh()
 
     def refresh_devices(self):
+        self._populate_devices()
+        self.camera.mvs.refresh()
+
+    def _populate_devices(self):
         current = self.device_combo.currentData()
         self.device_combo.blockSignals(True)
         self.device_combo.clear()
@@ -590,15 +596,13 @@ class CapturePage(QWidget):
         i = next((i for i, d in enumerate(devices) if bytes(d.id()).hex() == current), 0)
         self.device_combo.setCurrentIndex(i if devices else -1)
         self.device_combo.blockSignals(False)
+        self.device_combo.setToolTip(self.camera.mvs.discovery_error)
         self.refresh_formats()
 
     def refresh_formats(self, *_):
         self.format_combo.clear()
-        formats = self.camera.formats(self.device_combo.currentIndex())
-        for f in formats:
-            self.format_combo.addItem(
-                f"{f.resolution().width()} × {f.resolution().height()} · {f.maxFrameRate():g} fps · {f.pixelFormat().name.replace('Format_', '')}"
-            )
+        for label in self.camera.format_labels(self.device_combo.currentIndex()):
+            self.format_combo.addItem(label)
 
     def connect_camera(self):
         if self.camera.video_busy:
@@ -622,10 +626,21 @@ class CapturePage(QWidget):
         if not active:
             self.stop_interval()
         support = camera.supportedFeatures() if active and camera else QCamera.Feature(0)
-        self.exposure_auto.setEnabled(bool(support & QCamera.Feature.ManualExposureTime))
-        self.exposure.setEnabled(
-            bool(support & QCamera.Feature.ManualExposureTime) and not self.exposure_auto.isChecked()
-        )
+        if active and self.camera.mvs.active:
+            self._native_exposure = (self.exposure_auto.isChecked(), self.exposure.value())
+            self._sync_mvs_exposure()
+        else:
+            if self._native_exposure is not None:
+                auto, value = self._native_exposure
+                self._native_exposure = None
+                with QSignalBlocker(self.exposure_auto), QSignalBlocker(self.exposure):
+                    self.exposure_auto.setChecked(auto)
+                    self.exposure.setRange(0.01, 1000)
+                    self.exposure.setValue(value)
+            self.exposure_auto.setEnabled(bool(support & QCamera.Feature.ManualExposureTime))
+            self.exposure.setEnabled(
+                bool(support & QCamera.Feature.ManualExposureTime) and not self.exposure_auto.isChecked()
+            )
         self.wb.setEnabled(
             active
             and bool(camera)
@@ -637,7 +652,8 @@ class CapturePage(QWidget):
         self.focus_distance.setEnabled(bool(support & QCamera.Feature.FocusDistance))
         self.connect_button.setText("重新连接" if active else "连接相机")
         if active:
-            self.stream_status.setText("●  已连接 · " + camera.cameraDevice().description())
+            self.stream_status.setText("●  已连接 · " + self.camera.device_name)
+        if active and camera:
             for index, mode in enumerate(
                 [
                     QCamera.WhiteBalanceMode.WhiteBalanceAuto,
@@ -657,7 +673,22 @@ class CapturePage(QWidget):
                 self.focus.setItemEnabled(index, camera.isFocusModeSupported(mode))
         self.update_capture_controls()
 
+    def _sync_mvs_exposure(self):
+        exposure = self.camera.mvs.exposure
+        with QSignalBlocker(self.exposure_auto), QSignalBlocker(self.exposure):
+            self.exposure_auto.setChecked(exposure.auto)
+            if exposure.microseconds is not None:
+                self.exposure.setRange(exposure.min_us / 1000, min(1000, exposure.max_us / 1000))
+                self.exposure.setValue(exposure.microseconds / 1000)
+        self.exposure_auto.setEnabled(exposure.supports_auto)
+        self.exposure.setEnabled(exposure.manual and not exposure.auto)
+
     def set_exposure(self, *_):
+        if self.camera.mvs.active:
+            auto = self.exposure_auto.isChecked()
+            self.exposure.setEnabled(self.camera.mvs.exposure.manual and not auto)
+            self.camera.mvs.set_exposure(auto, self.exposure.value())
+            return
         camera = self.camera.camera
         if camera and camera.supportedFeatures() & QCamera.Feature.ManualExposureTime:
             auto = self.exposure_auto.isChecked()

@@ -270,8 +270,7 @@ class MainWindow(FluentWindow):
             event.ignore()
             return
         self.capture.stop_interval()
-        self.capture.camera.stop()
-        self.capture.camera.frame_pool.waitForDone()
+        self.capture.camera.shutdown()
         # Thumbnail jobs need their signals and pool to stay alive until completion.
         self.capture.recent_model.pool.waitForDone()
         self.home.recent_model.pool.waitForDone()

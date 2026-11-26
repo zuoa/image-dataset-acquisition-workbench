@@ -1,5 +1,6 @@
-"""Native frame conversion fixtures; these tests do not open or simulate a camera."""
+"""Camera controller and SDK boundary regressions without opening hardware."""
 
+import ctypes
 import threading
 import time
 
@@ -8,7 +9,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtMultimedia import QtVideo, QVideoFrame
 
-from workbench import camera
+from workbench import camera, mvs
 
 
 def pump(app, predicate, seconds=5):
@@ -120,4 +121,101 @@ def test_slow_conversion_keeps_gui_responsive_and_discards_disconnected_result(
         release.set()
         controller.stop()
         controller.frame_pool.waitForDone()
+        qt_app.processEvents()
+
+
+def test_mvs_missing_library_leaves_native_inputs_available(qt_app, monkeypatch, tmp_path):
+    monkeypatch.setenv("VANNUS_MVS_LIBRARY", str(tmp_path / "missing-mvs-library"))
+    controller = camera.CameraController()
+    native_device = object()
+    monkeypatch.setattr(controller.media, "videoInputs", lambda: [native_device])
+    try:
+        controller.mvs.refresh()
+        pump(qt_app, lambda: bool(controller.mvs.discovery_error))
+        assert "MVS SDK" in controller.mvs.discovery_error
+        assert controller.devices() == [native_device]
+    finally:
+        controller.shutdown()
+
+
+def test_mvs_usb_devices_have_serial_based_ids():
+    records = [mvs.UsbDeviceEntry() for _ in range(3)]
+    for record, model, serial in zip(records, (mvs.MODEL, mvs.MODEL, "Different"), ("B", "A", "C")):
+        record.transport = mvs.USB_DEVICE
+        record.usb.model = model.encode()
+        record.usb.serial = serial.encode()
+
+    def enum_devices(transport, pointer):
+        assert transport == mvs.USB_DEVICE
+        devices = pointer._obj
+        devices.count = len(records)
+        for index, record in enumerate(records):
+            devices.entries[index] = ctypes.addressof(record)
+        return 0
+
+    sdk = mvs.MvsSdk.__new__(mvs.MvsSdk)
+    sdk.EnumDevices = enum_devices
+    found = [device for device, _ in sdk.devices()]
+    assert [device.id() for device in found] == [b"mvs:usb:B", b"mvs:usb:A"]
+    assert len({device.description() for device in found}) == 2
+
+
+def test_mvs_mono8_snapshot_owns_the_sdk_pixels():
+    pixels = (ctypes.c_ubyte * (mvs.WIDTH * mvs.HEIGHT))()
+    pixels[13] = 192
+    pixels[mvs.WIDTH + 4] = 42
+    frame = mvs.FrameOut()
+    frame.data = ctypes.addressof(pixels)
+    frame.info.width = mvs.WIDTH
+    frame.info.height = mvs.HEIGHT
+    frame.info.pixel_type = mvs.MONO8
+    frame.info.length = len(pixels)
+
+    image = mvs.mono_image(frame)
+    pixels[13] = 0
+    assert image.size().toTuple() == (1440, 1080)
+    assert image.pixelColor(13, 0).getRgb() == (192, 192, 192, 255)
+    assert image.pixelColor(4, 1).getRgb() == (42, 42, 42, 255)
+    frame.info.length -= 1
+    with pytest.raises(mvs.MvsError, match="Mono8"):
+        mvs.mono_image(frame)
+
+
+def test_mvs_reconnect_discards_in_flight_frame(qt_app, monkeypatch):
+    controller = camera.CameraController()
+    devices = [mvs.MvsDevice(mvs.MODEL, serial) for serial in ("1", "2")]
+    controller.mvs.devices = devices
+    monkeypatch.setattr(controller.media, "videoInputs", lambda: [])
+    backend = controller.mvs.backend
+    entered, release = threading.Event(), threading.Event()
+    opened = []
+    delivered = []
+    controller.frame.connect(delivered.append)
+
+    def read(change):
+        image = QImage(mvs.WIDTH, mvs.HEIGHT, QImage.Format.Format_Grayscale8)
+        if opened[-1] == devices[0]:
+            image.fill(QColor("white"))
+            entered.set()
+            assert release.wait(5)
+        else:
+            image.fill(QColor("black"))
+        return (image, time.monotonic()), mvs.Exposure(), ""
+
+    monkeypatch.setattr(backend, "open", opened.append)
+    monkeypatch.setattr(backend, "read", read)
+    try:
+        controller.open(0)
+        pump(qt_app, entered.is_set)
+        controller.open(1)
+        with pytest.raises(ValueError, match="暂无可采集"):
+            controller.snapshot()
+        release.set()
+        pump(qt_app, lambda: bool(delivered))
+        assert opened == devices
+        assert controller.metadata()["device_id"] == devices[1].id().hex()
+        assert all(image.pixelColor(0, 0) == QColor("black") for image in delivered)
+    finally:
+        release.set()
+        controller.shutdown()
         qt_app.processEvents()

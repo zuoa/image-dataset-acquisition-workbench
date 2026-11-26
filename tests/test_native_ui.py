@@ -183,6 +183,37 @@ def test_photo_save_keeps_canvas_enabled_and_restores_preview_priority(qt_app, t
         qt_app.processEvents()
 
 
+def test_mvs_stream_failure_discards_unfinished_recording(qt_app, tmp_path, monkeypatch):
+    from workbench.storage import Workspace
+
+    workspace = Workspace(tmp_path / "stream-failure")
+    dataset = workspace.save_dataset("断流检查")
+    batch = workspace.save_batch(dataset, "当前批次")
+    lock = QLockFile(str(workspace.root / ".fieldwork.lock"))
+    assert lock.tryLock(100)
+    preferences = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setenv("VANNUS_MVS_LIBRARY", str(tmp_path / "missing-sdk"))
+    window = MainWindow(workspace, preferences, tmp_path, lock)
+    pane = window.capture
+    camera = pane.camera
+    staging = workspace.new_recording_path()
+    staging.write_bytes(b"unfinished recording")
+    pane.recording_context = dict(dataset_id=dataset, batch_id=batch, path=str(staging))
+    camera.recording_path = staging
+    errors = []
+    camera.video_error.connect(errors.append)
+    try:
+        camera.mvs.failed.emit("海康相机已断开")
+        pump(qt_app, lambda: not camera.video_busy)
+        assert errors == ["海康相机已断开"]
+        assert pane.recording_context is None
+        assert workspace.videos(dataset_id=dataset) == []
+        assert not staging.parent.exists()
+    finally:
+        window.close()
+        qt_app.processEvents()
+
+
 def test_unified_library_filters_actions_and_capture_context(qt_app, tmp_path, monkeypatch):
     from workbench.storage import Workspace
 
