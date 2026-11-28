@@ -41,9 +41,16 @@ class SidebarBrand(NavigationWidget):
 class SidebarItem(NavigationPushButton):
     def __init__(self, icon, text, parent=None):
         super().__init__(icon, text, True, parent)
+        self._badge = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName(text)
+
+    def set_badge(self, visible: bool):
+        flag = bool(visible)
+        if self._badge != flag:
+            self._badge = flag
+            self.update()
 
     def setCompacted(self, compact):
         self.isCompacted = compact
@@ -78,3 +85,10 @@ class SidebarItem(NavigationPushButton):
             painter.drawText(
                 QRectF(42, 0, self.width() - 50, self.height()), Qt.AlignmentFlag.AlignVCenter, self.text()
             )
+        if self._badge:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(BLUE))
+            if self.isCompacted:
+                painter.drawEllipse(QRectF(26, 8, 7, 7))
+            else:
+                painter.drawEllipse(QRectF(self.width() - 20, (self.height() - 7) / 2, 7, 7))

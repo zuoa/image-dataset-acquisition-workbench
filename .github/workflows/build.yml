@@ -46,6 +46,8 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Build application
+        env:
+          VANNUS_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: uv run --locked python scripts/build.py
 
       - name: Verify and archive macOS application
@@ -54,6 +56,8 @@ jobs:
           ARTIFACT_NAME: ${{ matrix.artifact }}
         run: |
           codesign --verify --deep --strict dist/Vannus.app
+          test -f dist/Vannus.app/Contents/Frameworks/BUILD_VERSION
+          plutil -extract CFBundleShortVersionString raw dist/Vannus.app/Contents/Info.plist
           ditto -c -k --sequesterRsrc --keepParent dist/Vannus.app "dist/$ARTIFACT_NAME.zip"
 
       - name: Archive Windows application
@@ -63,6 +67,9 @@ jobs:
         run: |
           if (!(Test-Path dist/Vannus/Vannus.exe)) {
             throw "Missing Windows executable: dist/Vannus/Vannus.exe"
+          }
+          if (!(Test-Path dist/Vannus/_internal/BUILD_VERSION) -and !(Test-Path dist/Vannus/BUILD_VERSION)) {
+            throw "Missing bundled BUILD_VERSION in Windows build"
           }
           Compress-Archive -Path dist/Vannus -DestinationPath "dist/$env:ARTIFACT_NAME.zip"
 
@@ -91,6 +98,11 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Generate SHA256SUMS.txt
+        run: |
+          (cd artifacts && sha256sum Vannus-*.zip > SHA256SUMS.txt)
+          cat artifacts/SHA256SUMS.txt
+
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -98,8 +110,8 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" artifacts/*.zip --clobber
+            gh release upload "$RELEASE_TAG" artifacts/*.zip artifacts/SHA256SUMS.txt --clobber
           else
-            gh release create "$RELEASE_TAG" artifacts/*.zip \
+            gh release create "$RELEASE_TAG" artifacts/*.zip artifacts/SHA256SUMS.txt \
               --verify-tag --generate-notes --title "Vannus $RELEASE_TAG"
           fi

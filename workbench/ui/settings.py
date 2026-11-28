@@ -29,6 +29,7 @@ from qfluentwidgets import (
 
 from .. import __version__, mvs
 from ..timeutils import display_now, format_datetime
+from ..updater import RELEASES_PAGE_URL
 from .common import IconBadge, confirm, heading, keycap_row, muted, panel
 from .theme import BLUE, BORDER, INK, MUTED, RADIUS_CARD, SURFACE, SURFACE_HOVER, SoftCard, StatusPill
 
@@ -298,8 +299,40 @@ class SettingsPage(QWidget):
         cl.addWidget(logs, alignment=Qt.AlignmentFlag.AlignLeft)
         box.addWidget(card)
 
-        card, cl = panel("关于 Vannus", icon=FIF.INFO)
-        cl.addWidget(SubtitleLabel(f"版本 {__version__}"))
+        card, cl = panel("关于 Vannus", "通过 GitHub Releases 检查并安装新版本。", icon=FIF.INFO)
+        version_row = QHBoxLayout()
+        version_row.setSpacing(10)
+        self.version_label = SubtitleLabel(f"版本 {__version__}")
+        version_row.addWidget(self.version_label)
+        self.update_status = StatusPill("未检查", "neutral", dot=True)
+        version_row.addWidget(self.update_status)
+        version_row.addStretch()
+        cl.addLayout(version_row)
+        self.update_detail = muted("")
+        cl.addWidget(self.update_detail)
+        auto_row = QHBoxLayout()
+        self.auto_check_updates = SwitchButton("启动时自动检查更新")
+        self.auto_check_updates.setOnText("已开启")
+        self.auto_check_updates.setOffText("已关闭")
+        self.auto_check_updates.setChecked(app.updater.auto_check)
+        self.auto_check_updates.checkedChanged.connect(app.updater.set_auto_check)
+        auto_row.addWidget(self.auto_check_updates)
+        auto_row.addStretch()
+        cl.addLayout(auto_row)
+        update_actions = QHBoxLayout()
+        update_actions.setSpacing(8)
+        self.check_update_button = PushButton(FIF.SYNC, "检查更新")
+        self.check_update_button.clicked.connect(lambda: app.check_for_updates(manual=True))
+        self.install_update_button = PrimaryPushButton(FIF.DOWNLOAD, "查看并更新")
+        self.install_update_button.clicked.connect(app.show_update_dialog)
+        self.install_update_button.hide()
+        self.releases_button = PushButton(FIF.GLOBE, "打开发布页")
+        self.releases_button.clicked.connect(lambda: app.open_url(RELEASES_PAGE_URL))
+        update_actions.addWidget(self.check_update_button)
+        update_actions.addWidget(self.install_update_button)
+        update_actions.addWidget(self.releases_button)
+        update_actions.addStretch()
+        cl.addLayout(update_actions)
         cl.addWidget(muted("Power By AJ"))
         box.addWidget(card)
         box.addStretch()
@@ -309,6 +342,7 @@ class SettingsPage(QWidget):
         scroll.setWidget(outer)
         layout.addWidget(scroll, 1)
         app.capture.camera.devices_changed.connect(self._update_mvs_status)
+        app.updater.state_changed.connect(self._update_version_status)
         self.refresh()
 
     def refresh(self):
@@ -319,6 +353,58 @@ class SettingsPage(QWidget):
             f"剩余空间 {usage.free / 1024**3:.1f} GB  /  总容量 {usage.total / 1024**3:.1f} GB（已用 {used_pct}%）"
         )
         self._update_mvs_status()
+        self._update_version_status()
+
+    def _update_version_status(self):
+        updater = self.app.updater
+        self.auto_check_updates.blockSignals(True)
+        self.auto_check_updates.setChecked(updater.auto_check)
+        self.auto_check_updates.blockSignals(False)
+        self.check_update_button.setEnabled(not updater.checking and not updater.downloading)
+
+        result = updater.last_result
+        if updater.checking:
+            self.update_status.set_status("正在检查…", "info", dot=True)
+            self.update_detail.setText("正在连接 GitHub Releases 获取最新版本信息…")
+            self.install_update_button.hide()
+            return
+        if updater.downloading:
+            self.update_status.set_status("正在更新", "info", dot=True)
+            self.update_detail.setText("正在下载并校验安装包…")
+            self.install_update_button.hide()
+            return
+        if result is not None and result.update_available and result.latest_release is not None:
+            latest = result.latest_release.version.display
+            ignored = updater.is_version_ignored(result.latest_release)
+            self.update_status.set_status(
+                f"可更新 v{latest}" if not ignored else f"已忽略 v{latest}",
+                "info" if not ignored else "neutral",
+                dot=True,
+            )
+            detail = f"发现新版本 v{latest}。"
+            if result.fallback_reason:
+                detail = f"{detail} {result.fallback_reason}"
+            self.update_detail.setText(detail)
+            self.install_update_button.setText("查看并更新" if result.can_auto_install else "查看新版本")
+            self.install_update_button.show()
+            return
+        if result is not None:
+            self.update_status.set_status("已是最新", "success", dot=True)
+            self.update_detail.setText(f"当前已是最新版本 v{result.current_version.display}。")
+            self.install_update_button.hide()
+            return
+        if updater.last_error:
+            self.update_status.set_status("检查失败", "warning", dot=True)
+            self.update_detail.setText(updater.last_error)
+            self.install_update_button.hide()
+            return
+
+        self.update_status.set_status("未检查", "neutral", dot=True)
+        if updater.install_target.kind == "source":
+            self.update_detail.setText("当前为源码运行环境；检查到新版本后可前往 GitHub 发布页查看。")
+        else:
+            self.update_detail.setText("支持通过 GitHub Releases 自动下载、校验并重启更新。")
+        self.install_update_button.hide()
 
     def _update_mvs_status(self):
         path, source = mvs.library_location()

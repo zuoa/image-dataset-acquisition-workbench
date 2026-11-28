@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, QRect, QStandardPaths, Qt, QUrl
+from PySide6.QtCore import QLockFile, QRect, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QMessageBox, QVBoxLayout
 from qfluentwidgets import (
@@ -42,10 +43,22 @@ from .ui.navigation import SidebarBrand, SidebarItem
 from .ui.settings import SettingsPage, TrashPage
 from .ui.theme import BACKGROUND, BLUE, SIDEBAR_BG, SoftCard
 from .ui.typography import install_typography
+from .ui.update_dialog import UpdateDialog
+from .update_service import UpdateService
+from .updater import cleanup_stale_updates, detect_install_target, launch_detached_updater
 
 
 class MainWindow(FluentWindow):
-    def __init__(self, workspace, preferences, log_dir, workspace_lock):
+    def __init__(
+        self,
+        workspace,
+        preferences,
+        log_dir,
+        workspace_lock,
+        *,
+        workspace_arg=None,
+        update_dir=None,
+    ):
         install_typography()
         setThemeColor(QColor(BLUE))
         super().__init__()
@@ -54,6 +67,10 @@ class MainWindow(FluentWindow):
         mvs.set_custom_library_path(preferences.value("mvs/library_path", "", type=str))
         self.log_dir = log_dir
         self.workspace_lock = workspace_lock
+        self._workspace_arg = workspace_arg
+        self._applying_update = False
+        self._update_dialog = None
+        self.updater = UpdateService(preferences, update_dir or (log_dir.parent / "updates"), parent=self)
         self.runner = TaskRunner(self)
         self.feedback = CaptureFeedback(preferences, self)
         self._success = None
@@ -88,7 +105,9 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.capture, FIF.CAMERA, "采集")
         self.addSubInterface(self.library, FIF.PHOTO, "素材库")
         self.addSubInterface(self.trash, FIF.DELETE, "回收站", NavigationItemPosition.BOTTOM)
-        self.addSubInterface(self.settings, FIF.SETTING, "设置", NavigationItemPosition.BOTTOM)
+        self.settings_nav_item = self.addSubInterface(
+            self.settings, FIF.SETTING, "设置", NavigationItemPosition.BOTTOM
+        )
         self.navigationInterface.setCurrentItem(self.home.objectName())
         self.navigationInterface.expand(useAni=False)
         self.home.acquire.connect(self.open_capture)
@@ -123,6 +142,8 @@ class MainWindow(FluentWindow):
         self.runner.done.connect(self._done)
         self.runner.error.connect(self._error)
         self.runner.busy_changed.connect(self._busy_changed)
+        self.updater.check_finished.connect(self._on_update_check_finished)
+        self.updater.check_failed.connect(self._on_update_check_failed)
 
     def addSubInterface(self, interface, icon, text, position=NavigationItemPosition.TOP):
         interface.setProperty("isStackedTransparent", False)
@@ -257,6 +278,100 @@ class MainWindow(FluentWindow):
     def open_url(self, url):
         QDesktopServices.openUrl(QUrl(url))
 
+    def start_startup_update_check(self):
+        if os.environ.get("VANNUS_DISABLE_UPDATE_CHECK") == "1":
+            return
+        if not self.updater.auto_check:
+            return
+        self.updater.check_for_updates(manual=False)
+
+    def check_for_updates(self, *, manual=True):
+        return self.updater.check_for_updates(manual=manual)
+
+    def update_nav_badge(self):
+        self.settings_nav_item.set_badge(self.updater.has_unignored_update())
+
+    def _on_update_check_finished(self, result, manual):
+        self.update_nav_badge()
+        release = result.latest_release
+        if result.update_available and release is not None:
+            if manual:
+                self.show_update_dialog(result)
+            elif not self.updater.is_version_ignored(release):
+                bar = InfoBar.info(
+                    title=f"发现新版本 v{release.version.display}",
+                    content="点击查看更新内容并进行升级。",
+                    orient=Qt.Orientation.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    duration=10000,
+                    parent=self,
+                )
+                action = PushButton("查看更新", bar)
+                action.clicked.connect(bar.close)
+                action.clicked.connect(lambda _=False, res=result: self.show_update_dialog(res))
+                bar.addWidget(action)
+        elif manual:
+            self.notify(f"当前已是最新版本（v{result.current_version.display}）")
+
+    def _on_update_check_failed(self, message, manual):
+        self.update_nav_badge()
+        if manual:
+            self.notify(message, error=True)
+
+    def show_update_dialog(self, result=None):
+        active_result = result or self.updater.last_result
+        if active_result is None or not active_result.update_available or active_result.latest_release is None:
+            return
+        if self._update_dialog is not None:
+            self._update_dialog.raise_()
+            self._update_dialog.activateWindow()
+            return
+        dialog = UpdateDialog(self, active_result, parent=self)
+        self._update_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._update_dialog = None
+            self.update_nav_badge()
+
+    def apply_staged_update(self, staged):
+        if self.capture.camera.video_busy:
+            self.notify("正在录制视频，请先停止录制并等待保存完成后再安装更新", error=True)
+            return False
+        if self.runner.busy:
+            self.notify("后台任务仍在运行，请等待任务完成后再安装更新", error=True)
+            return False
+        self.capture.stop_interval()
+        self.capture.camera.shutdown()
+        self.capture.recent_model.pool.waitForDone()
+        self.home.recent_model.pool.waitForDone()
+        self.library.model.pool.waitForDone()
+        self.preferences.setValue("geometry", self.saveGeometry())
+        self.preferences.sync()
+        self.workspace_lock.unlock()
+        try:
+            launch_detached_updater(
+                staged,
+                self.updater.install_target,
+                self.log_dir / "updater.log",
+                workspace_arg=self._workspace_arg,
+            )
+        except Exception as error:
+            logging.exception("Failed to launch detached updater")
+            self.workspace_lock.tryLock(100)
+            self.notify(f"启动更新程序失败：{error}", error=True)
+            return False
+        self._applying_update = True
+        QTimer.singleShot(0, self._quit_for_update)
+        return True
+
+    def _quit_for_update(self):
+        self.close()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
     def import_archive(self):
         path, _ = QFileDialog.getOpenFileName(self, "导入完整数据集归档", "", "ZIP 归档 (*.zip)")
         if path:
@@ -273,6 +388,10 @@ class MainWindow(FluentWindow):
             )
 
     def closeEvent(self, event):
+        if self._applying_update:
+            self.updater.shutdown()
+            super().closeEvent(event)
+            return
         if self.capture.camera.video_busy:
             self.capture.camera.stop_recording()
             self.notify("正在停止录制并保存视频，保存完成后可关闭窗口", error=True)
@@ -282,6 +401,7 @@ class MainWindow(FluentWindow):
             self.notify("后台任务仍在运行，请取消或等待完成后关闭", error=True)
             event.ignore()
             return
+        self.updater.shutdown()
         self.capture.stop_interval()
         self.capture.camera.shutdown()
         # Thumbnail jobs need their signals and pool to stay alive until completion.
@@ -329,12 +449,23 @@ def main(argv=None):
         level=logging.INFO, handlers=[handler], format="%(asctime)s %(levelname)s %(message)s"
     )
     try:
+        updates_dir = data_dir / "updates"
+        cleanup_stale_updates(updates_dir, detect_install_target())
         workspace = Workspace(root)
-        window = MainWindow(workspace, preferences, log_dir, workspace_lock)
+        window = MainWindow(
+            workspace,
+            preferences,
+            log_dir,
+            workspace_lock,
+            workspace_arg=args.workspace,
+            update_dir=updates_dir,
+        )
         geometry = preferences.value("geometry")
         if geometry:
             window.restoreGeometry(geometry)
         window.show()
+        if os.environ.get("VANNUS_DISABLE_UPDATE_CHECK") != "1":
+            QTimer.singleShot(2500, window.start_startup_update_check)
         return app.exec()
     except Exception as error:
         logging.exception("Application startup failed")

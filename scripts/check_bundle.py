@@ -1,6 +1,7 @@
 """Verify a macOS build opens a real native window, then terminate that instance."""
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -14,6 +15,8 @@ import Quartz
 
 root = Path(__file__).resolve().parents[1]
 (root / "build").mkdir(exist_ok=True)
+env = os.environ.copy()
+env["VANNUS_DISABLE_UPDATE_CHECK"] = "1"
 with (root / "build/bundle-launch.log").open("w") as output:
     process = subprocess.Popen(
         [
@@ -23,6 +26,7 @@ with (root / "build/bundle-launch.log").open("w") as output:
         ],
         stdout=output,
         stderr=subprocess.STDOUT,
+        env=env,
     )
     try:
         window = None
