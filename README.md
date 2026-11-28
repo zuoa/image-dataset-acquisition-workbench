@@ -50,12 +50,12 @@ macOS 使用系统原生的红、黄、绿窗口按钮，位于左上角，分�
 
 ## 海康 MV-CS016-10UM
 
-1. 下载并安装适用于本机的 MVS。macOS Apple Silicon / Intel 安装 MVS SDK 框架，Windows x64 安装 MVS x64 运行时及 USB3 Vision 驱动。[海康机器人下载中心](https://www.hikrobotics.com/en/machinevision/service/download/)
+1. 下载并安装适用于本机的 MVS。macOS Apple Silicon / Intel 安装 MVS SDK 框架，Windows x64 安装 MVS x64 运行时及 USB3 Vision 驱动。[海康机器人下载中心](https://www.hikrobotics.com/cn/machinevision/service/download/)（也可在应用内「设置 → 海康 MVS SDK」一键前往下载并检测状态）。
 2. 将相机接入 USB 3 端口。在 MVS 客户端确认能找到相机并预览，然后关闭 MVS 客户端以释放设备。
 3. 在「采集工作台 → 相机操作 → 刷新设备」中刷新列表，选择「海康 MV-CS016-10UM」及对应序列号，再点击「连接相机」。使用全幅 1440 × 1080 Mono8 采集，录像为最高约 30 fps 的 MP4 / H.264。
 4. 工作台每次连接海康相机时固定使用手动曝光。展开「相机参数」，按相机支持的范围填写曝光时间（毫秒），按回车或离开输入框应用。
 
-SDK 安装在非默认位置时，可在启动应用前设置 `VANNUS_MVS_LIBRARY`，值为 `MvCameraControl.framework/MvCameraControl` 或 `MvCameraControl.dll` 的完整路径。若连接失败，请确认 SDK 架构、USB3 Vision 驱动、USB 连接以及设备占用情况。相机拔插后在工作台刷新并重新连接。
+SDK 安装在非默认位置时，可在「设置 → 海康 MVS SDK → 选择本地 SDK…」中指定路径并立即重新检测，也可在启动应用前设置 `VANNUS_MVS_LIBRARY`，值为 `MvCameraControl.framework/MvCameraControl` 或 `MvCameraControl.dll` 的完整路径。若连接失败，请确认 SDK 架构、USB3 Vision 驱动、USB 连接以及设备占用情况。相机拔插后在工作台刷新并重新连接。
 
 ### 照蛋模式
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import QEvent, QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (
     QDialog,
@@ -16,11 +16,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    Action,
     BodyLabel,
     LineEdit,
     PrimaryPushButton,
     PushButton,
+    RoundMenu,
     ScrollArea,
+    SearchLineEdit,
     SegmentedWidget,
     Slider,
     SubtitleLabel,
@@ -36,6 +39,7 @@ from .common import (
     ComboBox,
     FormDialog,
     confirm,
+    divider,
     heading,
     list_view,
     menu_button,
@@ -44,7 +48,7 @@ from .common import (
     video_duration,
 )
 from .models import ROLE, MediaModel, PhotoDelegate, media_title
-from .theme import BACKGROUND
+from .theme import BACKGROUND, StatusPill
 
 
 def camera_settings_lines(camera):
@@ -63,69 +67,159 @@ def camera_settings_lines(camera):
 
 
 class PhotoDialog(QDialog):
-    def __init__(self, app, photo):
+    def __init__(self, app, photo, *, photos=None, index=0):
         super().__init__(app)
         self.setObjectName("photoDialog")
         # Native dialogs can inherit the OS dark palette while Fluent stays light.
         self.setStyleSheet(f"QDialog#photoDialog {{ background: {BACKGROUND}; }}")
         self.setWindowTitle("图片详情 · Vannus")
-        self.resize(1100, 760)
+        self.resize(1120, 760)
         self.setMinimumSize(750, 550)
-        self.app, self.photo = app, photo
+        self.app = app
+        self._interactive = hasattr(app, "refresh")
+        self._photos = list(photos) if photos else [photo]
+        self._index = max(0, min(index, len(self._photos) - 1))
+        self.photo = photo
+        self.paths = []
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(16)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+
         header = QHBoxLayout()
-        header.setSpacing(12)
-        self.title = SubtitleLabel(media_title(photo))
+        header.setSpacing(8)
+        self.title = SubtitleLabel("")
         self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.title.setToolTip(self.title.text())
         self.title.installEventFilter(self)
         header.addWidget(self.title, 1)
+
+        self.prev_button = PushButton(FIF.LEFT_ARROW, "上一张")
+        self.prev_button.setToolTip("上一张图片 (←)")
+        self.prev_button.clicked.connect(lambda: self.step(-1))
+        header.addWidget(self.prev_button)
+
+        self.index_pill = StatusPill("1 / 1", "neutral", dot=False)
+        header.addWidget(self.index_pill)
+
+        self.next_button = PushButton(FIF.RIGHT_ARROW, "下一张")
+        self.next_button.setToolTip("下一张图片 (→)")
+        self.next_button.clicked.connect(lambda: self.step(1))
+        header.addWidget(self.next_button)
+
         self.choice = ComboBox()
-        self.paths = [photo["original"]]
-        self.choice.addItem("原图")
-        history = json.loads(photo["processing"])
-        for processing in reversed(history):
-            for crop in processing["crops"]:
-                self.choice.addItem(f"处理 v{processing['version']} · {crop['region']['name']}")
-                self.paths.append(crop["path"])
+        self.choice.currentIndexChanged.connect(self.select_image)
         header.addWidget(self.choice)
+
+        self.fit_button = PushButton(FIF.FIT_PAGE, "适应窗口")
+        self.fit_button.setToolTip("适应窗口 (0)")
+        self.fit_button.clicked.connect(lambda: self.canvas.reset_view())
+        header.addWidget(self.fit_button)
+
         reveal = PushButton(FIF.FOLDER, "打开所在文件夹")
         reveal.clicked.connect(
             lambda: app.open_path(app.workspace.path(self.paths[self.choice.currentIndex()]).parent)
         )
         header.addWidget(reveal)
         layout.addLayout(header)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(16)
+        splitter.setHandleWidth(14)
         splitter.setChildrenCollapsible(False)
         self.canvas = ImageCanvas()
         splitter.addWidget(self.canvas)
-        self.details_panel, box = panel("采集记录")
-        self.details_panel.setMinimumWidth(280)
-        self.details_panel.setMaximumWidth(340)
+
+        self.details_panel, box = panel("采集记录", icon=FIF.INFO)
+        self.details_panel.setMinimumWidth(272)
+        self.details_panel.setMaximumWidth(332)
+        self.details_scroll = ScrollArea()
+        self.details_scroll.setWidgetResizable(True)
+        self.details_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.details_scroll.enableTransparentBackground()
+        box.addWidget(self.details_scroll, 1)
+
+        if self._interactive:
+            box.addWidget(divider())
+            actions = QHBoxLayout()
+            actions.setSpacing(8)
+            self.edit_button = PushButton(FIF.EDIT, "编辑信息")
+            self.edit_button.clicked.connect(self.edit_photo)
+            self.trash_button = PushButton(FIF.DELETE, "移入回收站")
+            self.trash_button.setProperty("dangerAction", True)
+            self.trash_button.clicked.connect(self.trash_photo)
+            actions.addWidget(self.edit_button, 1)
+            actions.addWidget(self.trash_button, 1)
+            box.addLayout(actions)
+
+        splitter.addWidget(self.details_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([760, 296])
+        layout.addWidget(splitter, 1)
+
+        self._load_photo(photo)
+
+    def _elide_title(self):
+        self.title.setText(
+            self.title.fontMetrics().elidedText(
+                self.title.toolTip(), Qt.TextElideMode.ElideRight, max(40, self.title.width())
+            )
+        )
+
+    def _load_photo(self, photo):
+        fresh = self.app.workspace.photo(photo["id"]) if photo and photo.get("id") else None
+        self.photo = fresh or photo
+        self._photos[self._index] = self.photo
+        title_text = media_title(self.photo)
+        self.title.setToolTip(title_text)
+        self.title.setText(title_text)
+        if self.title.width() > 40:
+            self._elide_title()
+
+        multi = len(self._photos) > 1
+        self.prev_button.setVisible(multi)
+        self.next_button.setVisible(multi)
+        self.index_pill.setVisible(multi)
+        if multi:
+            self.prev_button.setEnabled(self._index > 0)
+            self.next_button.setEnabled(self._index < len(self._photos) - 1)
+            self.index_pill.set_status(f"{self._index + 1} / {len(self._photos)}", "info", dot=False)
+
+        self.paths = [self.photo["original"]]
+        with QSignalBlocker(self.choice):
+            self.choice.clear()
+            self.choice.addItem("原图")
+            history = json.loads(self.photo["processing"])
+            for processing in reversed(history):
+                for crop in processing["crops"]:
+                    self.choice.addItem(f"处理 v{processing['version']} · {crop['region']['name']}")
+                    self.paths.append(crop["path"])
+            default_index = self.paths.index(photo_preview(self.photo))
+            self.choice.setCurrentIndex(default_index)
+        self.select_image(default_index)
+
         details = QWidget()
         dl = QVBoxLayout(details)
-        dl.setContentsMargins(0, 0, 10, 0)
-        dl.setSpacing(18)
+        dl.setContentsMargins(0, 0, 8, 0)
+        dl.setSpacing(14)
 
         def field(label, value):
             group = QVBoxLayout()
-            group.setSpacing(6)
+            group.setSpacing(4)
             if label:
-                group.addWidget(BodyLabel(label))
+                lbl = BodyLabel(label)
+                lbl.setObjectName("sectionTitle")
+                group.addWidget(lbl)
             text = muted(value or "—")
             text.setTextFormat(Qt.TextFormat.PlainText)
             text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             group.addWidget(text)
             dl.addLayout(group)
 
-        created = format_datetime(photo["created_at"])
-        field(None, f"{photo['width']} × {photo['height']}\n{created}")
-        field("标签", photo["tags"])
-        field("备注", photo["note"])
-        metadata = json.loads(photo["metadata"])
+        created = format_datetime(self.photo["created_at"])
+        field(None, f"{self.photo['width']} × {self.photo['height']}\n{created}")
+        field("标签", self.photo["tags"])
+        field("备注", self.photo["note"])
+        metadata = json.loads(self.photo["metadata"])
         field("自定义信息", "\n".join(f"{k}：{v}" for k, v in metadata.get("custom", {}).items()))
         camera = metadata.get("camera", {})
         lines = [camera.get("device", "外部导入图像"), *camera_settings_lines(camera)]
@@ -138,34 +232,65 @@ class PhotoDialog(QDialog):
             )
         field("相机与处理记录", "\n".join(lines))
         dl.addStretch()
-        self.details_scroll = ScrollArea()
-        self.details_scroll.setWidgetResizable(True)
-        self.details_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        old = self.details_scroll.takeWidget()
+        if old is not None:
+            old.deleteLater()
         self.details_scroll.setWidget(details)
-        self.details_scroll.enableTransparentBackground()
-        box.addWidget(self.details_scroll, 1)
-        splitter.addWidget(self.details_panel)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        splitter.setSizes([720, 300])
-        layout.addWidget(splitter, 1)
-        default_index = self.paths.index(photo_preview(photo))
-        self.choice.setCurrentIndex(default_index)
-        self.choice.currentIndexChanged.connect(self.select_image)
-        self.select_image(default_index)
+
+    def step(self, delta):
+        target = self._index + delta
+        if 0 <= target < len(self._photos):
+            self._index = target
+            self._load_photo(self._photos[target])
+
+    def edit_photo(self):
+        dialog = FormDialog(
+            self,
+            "编辑样本信息",
+            [
+                ("sample_id", "样本编号", False),
+                ("tags", "标签", False),
+                ("note", "备注", True),
+                ("custom", "自定义信息", True),
+            ],
+            dict(self.photo, custom=json.loads(self.photo["metadata"]).get("custom", {})),
+        )
+        if dialog.exec():
+            self.app.workspace.update_photos([self.photo["id"]], **dialog.values())
+            self._load_photo(self.photo)
+            self.app.refresh()
+
+    def trash_photo(self):
+        if not confirm(self, "移入回收站？", "将当前图片及裁剪结果移入回收站。", True):
+            return
+        self.app.workspace.trash("photo", [self.photo["id"]])
+        self.app.refresh()
+        self._photos.pop(self._index)
+        if not self._photos:
+            self.accept()
+            return
+        self._index = min(self._index, len(self._photos) - 1)
+        self._load_photo(self._photos[self._index])
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Left:
+            self.step(-1)
+        elif event.key() == Qt.Key.Key_Right:
+            self.step(1)
+        elif event.key() == Qt.Key.Key_0:
+            self.canvas.reset_view()
+        else:
+            super().keyPressEvent(event)
 
     def eventFilter(self, widget, event):
         if widget is self.title and event.type() == QEvent.Type.Resize:
-            self.title.setText(
-                self.title.fontMetrics().elidedText(
-                    self.title.toolTip(), Qt.TextElideMode.ElideRight, self.title.width()
-                )
-            )
+            self._elide_title()
         return super().eventFilter(widget, event)
 
     def select_image(self, index):
-        image = QImage(str(self.app.workspace.path(self.paths[index])))
-        self.canvas.set_image(image)
+        if 0 <= index < len(self.paths):
+            image = QImage(str(self.app.workspace.path(self.paths[index])))
+            self.canvas.set_image(image)
 
 
 class ChoiceDialog(FormDialog):
@@ -189,7 +314,7 @@ class ImportImagesDialog(FormDialog):
         self.preferred_batch = batch_id
         self.viewLayout.insertWidget(1, muted(f"已选择 {count} 张图片，原图将保留，不自动套用裁剪模板。"))
         form = QFormLayout()
-        form.setSpacing(12)
+        form.setSpacing(10)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.dataset_combo = ComboBox()
         self.dataset_combo.setAccessibleName("导入到数据集")
@@ -213,7 +338,7 @@ class ImportImagesDialog(FormDialog):
         self.viewLayout.insertLayout(2, form)
         self.guidance = muted("")
         self.viewLayout.insertWidget(3, self.guidance)
-        self.widget.setMinimumWidth(520)
+        self.widget.setMinimumWidth(500)
         self.dataset_combo.setCurrentIndex(
             next((i for i, dataset in enumerate(self.datasets) if dataset["id"] == dataset_id), 0)
         )
@@ -287,10 +412,13 @@ class LibraryPage(QWidget):
         self.datasets = []
         self.batches = []
         self.current_filters = {}
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 26, 30, 18)
-        layout.setSpacing(18)
+        layout.setContentsMargins(24, 22, 24, 16)
+        layout.setSpacing(14)
+
         row = QHBoxLayout()
+        row.setSpacing(8)
         row.addWidget(heading("素材库"), 1)
         import_button = PushButton(FIF.ADD, "导入图片")
         import_button.clicked.connect(self.import_images)
@@ -302,31 +430,46 @@ class LibraryPage(QWidget):
         self.continue_button.clicked.connect(self.continue_capture)
         row.addWidget(self.continue_button)
         layout.addLayout(row)
+
         types = QHBoxLayout()
+        types.setSpacing(10)
         self.type_tabs = SegmentedWidget(self)
         for key, label in (("all", "全部"), ("photo", "图片"), ("video", "视频")):
             self.type_tabs.addItem(key, label)
         self.type_tabs.setCurrentItem("all")
-        self.type_tabs.setFixedWidth(300)
+        self.type_tabs.setFixedWidth(260)
         self.type_tabs.setAccessibleName("素材类型")
         types.addWidget(self.type_tabs)
         types.addStretch()
+        self.selection_count_pill = StatusPill("", "info", dot=False)
+        self.selection_count_pill.hide()
+        types.addWidget(self.selection_count_pill)
+        self.select_all_button = PushButton(FIF.CHECKBOX, "全选")
+        self.select_all_button.clicked.connect(lambda: self.view.selectAll())
+        self.select_all_button.hide()
+        types.addWidget(self.select_all_button)
+        self.clear_selection_button = PushButton(FIF.CLEAR_SELECTION, "取消选择")
+        self.clear_selection_button.clicked.connect(lambda: self.view.clearSelection())
+        self.clear_selection_button.hide()
+        types.addWidget(self.clear_selection_button)
         layout.addLayout(types)
+
         filters = QHBoxLayout()
+        filters.setSpacing(8)
         self.dataset_combo = ComboBox()
-        self.dataset_combo.setMinimumWidth(170)
+        self.dataset_combo.setMinimumWidth(160)
         self.dataset_combo.currentIndexChanged.connect(self.dataset_changed)
         filters.addWidget(self.dataset_combo)
         self.batch_combo = ComboBox()
-        self.batch_combo.setMinimumWidth(150)
+        self.batch_combo.setMinimumWidth(145)
         self.batch_combo.currentIndexChanged.connect(self.reload)
         filters.addWidget(self.batch_combo)
         self.date_combo = ComboBox()
-        self.date_combo.setMinimumWidth(140)
+        self.date_combo.setMinimumWidth(125)
         self.date_combo.addItems(["全部时间", "最近 7 天", "最近 30 天"])
         self.date_combo.currentIndexChanged.connect(self.reload)
         filters.addWidget(self.date_combo)
-        self.search = LineEdit()
+        self.search = SearchLineEdit()
         self.search.setPlaceholderText("搜索样本编号、标签或备注")
         self.search.setClearButtonEnabled(True)
         self.debounce = QTimer(self)
@@ -336,64 +479,148 @@ class LibraryPage(QWidget):
         self.search.textChanged.connect(lambda: self.debounce.start())
         filters.addWidget(self.search, 1)
         layout.addLayout(filters)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(12)
+        splitter.setChildrenCollapsible(False)
         self.model = MediaModel(app.workspace, self)
         self.delegate = PhotoDelegate(self)
         self.view = list_view(self, self.model, self.delegate)
-        self.view.doubleClicked.connect(lambda index: app.show_media(index.data(ROLE)))
+        self.view.doubleClicked.connect(lambda index: self._open_item(index.data(ROLE)))
         self.view.selectionModel().selectionChanged.connect(self.selection_changed)
+        self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._show_context_menu)
+        self.view.installEventFilter(self)
         splitter.addWidget(self.view)
-        side, box = panel("素材信息")
-        side.setMaximumWidth(290)
-        side.setMinimumWidth(250)
+
+        side, box = panel("素材信息", icon=FIF.INFO)
+        side.setMinimumWidth(256)
+        side.setMaximumWidth(300)
         self.details_panel = side
+        self.selection_badge = StatusPill("未选择", "neutral", dot=False)
+        box.addWidget(self.selection_badge)
         self.selection_title = BodyLabel("尚未选择素材")
         self.selection_title.setWordWrap(True)
         box.addWidget(self.selection_title)
         self.selection_details = muted("")
         box.addWidget(self.selection_details)
+        box.addWidget(divider())
         self.play_button = PushButton(FIF.VIDEO, "播放视频")
         self.play_button.clicked.connect(self.play_selected)
         box.addWidget(self.play_button)
         self.reveal_button = PushButton(FIF.FOLDER, "打开所在文件夹")
         self.reveal_button.clicked.connect(self.reveal_selected)
         box.addWidget(self.reveal_button)
-        self.edit_button = PushButton("编辑信息")
+        self.edit_button = PushButton(FIF.EDIT, "编辑信息")
         self.edit_button.clicked.connect(self.edit_selected)
         box.addWidget(self.edit_button)
         self.photo_actions = menu_button(
             "更多图片操作",
             [
-                ("移动到其他批次", self.move_selected),
-                ("重新裁剪", self.reprocess_selected),
+                (FIF.MOVE, "移动到其他批次", self.move_selected),
+                (FIF.CLIPPING_TOOL, "重新裁剪", self.reprocess_selected),
             ],
+            icon=FIF.MORE,
         )
         box.addWidget(self.photo_actions)
-        delete = PushButton(FIF.DELETE, "移入回收站")
-        delete.clicked.connect(self.delete_selected)
-        box.addWidget(delete)
+        self.delete_button = PushButton(FIF.DELETE, "移入回收站")
+        self.delete_button.setProperty("dangerAction", True)
+        self.delete_button.clicked.connect(self.delete_selected)
+        box.addWidget(self.delete_button)
         box.addStretch()
         splitter.addWidget(side)
-        side.hide()
         splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([860, 272])
         layout.addWidget(splitter, 1)
+
         footer = QHBoxLayout()
+        footer.setSpacing(10)
         self.count_label = muted("")
+        self.count_label.setWordWrap(False)
         self.model.total_changed.connect(self.update_summary)
         footer.addWidget(self.count_label)
         self.empty_label = muted("暂无匹配素材，可调整筛选、继续采集或导入图片。")
-        footer.addWidget(self.empty_label, 1)
+        self.empty_label.setWordWrap(False)
+        footer.addWidget(self.empty_label)
+        footer.addStretch(1)
         self.model.total_changed.connect(lambda total: self.empty_label.setVisible(total == 0))
-        footer.addWidget(muted("缩略图"))
+        thumb_label = muted("缩略图")
+        thumb_label.setWordWrap(False)
+        footer.addWidget(thumb_label)
         slider = Slider(Qt.Orientation.Horizontal)
         slider.setRange(170, 320)
-        slider.setValue(230)
-        slider.setFixedWidth(130)
+        slider.setValue(220)
+        slider.setFixedWidth(124)
         slider.valueChanged.connect(self.resize_cards)
         footer.addWidget(slider)
         layout.addLayout(footer)
+
         self.type_tabs.currentItemChanged.connect(self.reload)
         self.refresh()
+
+    def _open_item(self, item):
+        if not item:
+            return
+        if item.get("media_type") == "video":
+            self.app.show_media(item)
+            return
+        photos = [row for row in self.model.rows if row.get("media_type") == "photo"]
+        index = next((i for i, row in enumerate(photos) if row["id"] == item["id"]), 0)
+        self.app.show_photo(item, photos=photos, index=index)
+
+    def _show_context_menu(self, pos):
+        index = self.view.indexAt(pos)
+        if not index.isValid():
+            return
+        if not self.view.selectionModel().isSelected(index):
+            self.view.setCurrentIndex(index)
+        items = self.selected()
+        if not items:
+            return
+        only_photos = all(item["media_type"] == "photo" for item in items)
+        menu = RoundMenu(parent=self.view)
+        if len(items) == 1:
+            label = "播放视频" if items[0]["media_type"] == "video" else "查看大图"
+            act = Action(FIF.VIDEO if items[0]["media_type"] == "video" else FIF.PHOTO, label, menu)
+            act.triggered.connect(lambda: self._open_item(items[0]))
+            menu.addAction(act)
+            reveal = Action(FIF.FOLDER, "打开所在文件夹", menu)
+            reveal.triggered.connect(self.reveal_selected)
+            menu.addAction(reveal)
+        if only_photos:
+            edit = Action(FIF.EDIT, "编辑信息", menu)
+            edit.triggered.connect(self.edit_selected)
+            menu.addAction(edit)
+            move = Action("移动到其他批次", menu)
+            move.triggered.connect(self.move_selected)
+            menu.addAction(move)
+            reprocess = Action("重新裁剪", menu)
+            reprocess.triggered.connect(self.reprocess_selected)
+            menu.addAction(reprocess)
+        menu.addSeparator()
+        trash = Action(FIF.DELETE, "移入回收站", menu)
+        trash.triggered.connect(self.delete_selected)
+        menu.addAction(trash)
+        menu.exec(self.view.viewport().mapToGlobal(pos))
+
+    def eventFilter(self, widget, event):
+        if widget is self.view and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                items = self.selected()
+                if len(items) == 1:
+                    self._open_item(items[0])
+                    return True
+            elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+                if self.selected():
+                    self.delete_selected()
+                    return True
+            elif key == Qt.Key.Key_Escape:
+                if self.selected():
+                    self.view.clearSelection()
+                    return True
+        return super().eventFilter(widget, event)
 
     def dataset_id(self):
         i = self.dataset_combo.currentIndex()
@@ -471,30 +698,42 @@ class LibraryPage(QWidget):
         self.count_label.setText(
             f"共 {total:,} 项素材 · {self.model.counts['photo']:,} 张图片 · {self.model.counts['video']:,} 段视频"
         )
+        self.select_all_button.setVisible(total > 0)
 
     def selection_changed(self, *_):
         items = self.selected()
-        self.details_panel.setVisible(bool(items))
         only_photos = bool(items) and all(item["media_type"] == "photo" for item in items)
         self.edit_button.setVisible(only_photos)
         self.photo_actions.setVisible(only_photos)
         self.play_button.setVisible(len(items) == 1 and items[0]["media_type"] == "video")
         self.reveal_button.setVisible(len(items) == 1)
+        self.delete_button.setVisible(bool(items))
+        self.selection_count_pill.setVisible(bool(items))
+        self.clear_selection_button.setVisible(bool(items))
+        if items:
+            self.selection_count_pill.set_status(f"已选 {len(items)} 项", "info", dot=False)
+
         if not items:
+            self.selection_badge.set_status("未选择", "neutral", dot=False)
             self.selection_title.setText("尚未选择素材")
             self.selection_details.setText(
-                "双击图片查看大图，双击视频播放。\n按 Ctrl / ⌘ 或 Shift 可多选素材。"
+                "单击选中查看详情，双击打开大图或播放视频。\n按 Ctrl / ⌘ 或 Shift 可多选，右键打开快捷菜单。"
             )
         elif len(items) > 1:
+            self.selection_badge.set_status(f"已选 {len(items)} 项", "info", dot=False)
             self.selection_title.setText(f"已选择 {len(items)} 项素材")
             photos = sum(item["media_type"] == "photo" for item in items)
             self.selection_details.setText(f"{photos} 张图片 · {len(items) - photos} 段视频")
         else:
             item = items[0]
+            is_video = item["media_type"] == "video"
+            self.selection_badge.set_status(
+                "视频" if is_video else "图片", "candling" if is_video else "info", dot=False
+            )
             self.selection_title.setText(media_title(item))
             dimensions = (
                 f"视频 · {video_duration(item['duration_ms'])}"
-                if item["media_type"] == "video"
+                if is_video
                 else f"图片 · {item['width']} × {item['height']}"
             )
             metadata = json.loads(item["metadata"])

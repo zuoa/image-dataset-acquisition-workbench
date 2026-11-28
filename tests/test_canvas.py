@@ -70,3 +70,62 @@ def test_preview_resize_keeps_regions_but_source_resize_invalidates_them(qt_app)
     assert not canvas.regions
     assert dimensions[-1] == (1800, 1200)
     canvas.close()
+
+
+def test_canvas_four_corner_resize_zoom_pan_and_selection_signal(qt_app):
+    canvas = ImageCanvas(editable=True)
+    canvas.resize(600, 400)
+    canvas.set_image(QImage(600, 400, QImage.Format.Format_RGB32), QSize(1200, 800))
+    canvas.show()
+    qt_app.processEvents()
+    selections = []
+    canvas.selection_changed.connect(selections.append)
+    canvas.set_regions([dict(name="热区 1", x=200, y=200, w=400, h=200)])
+    # Top-left handle in screen coords: (100, 100); drag to (50, 50) -> source (100, 100), size (500, 300).
+    QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+    QTest.mouseMove(canvas, QPoint(50, 50))
+    QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+    assert selections[-1] == 0
+    assert {k: canvas.regions[0][k] for k in ("x", "y", "w", "h")} == dict(x=100, y=100, w=500, h=300)
+
+    # Zoomed empty-area pan & zoom badge reset.
+    canvas.zoom = 2.0
+    canvas._update_overlays()
+    qt_app.processEvents()
+    assert canvas.zoom_badge.isVisible()
+    assert "200%" in canvas.zoom_badge.text()
+    QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(500, 350))
+    QTest.mouseMove(canvas, QPoint(530, 370))
+    QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(530, 370))
+    assert canvas.pan == QPointF(30, 20)
+    canvas.zoom_badge.click()
+    assert canvas.zoom == 1.0
+    assert canvas.pan == QPointF()
+    assert not canvas.zoom_badge.isVisible()
+    canvas.close()
+    qt_app.processEvents()
+
+
+def test_canvas_overlays_flash_countdown_and_interval_hud(qt_app):
+    canvas = ImageCanvas(editable=True)
+    canvas.resize(600, 400)
+    canvas.set_image(QImage(600, 400, QImage.Format.Format_RGB32))
+    canvas.show()
+    qt_app.processEvents()
+    stopped = []
+    canvas.stop_interval_requested.connect(lambda: stopped.append(True))
+    canvas.trigger_flash()
+    assert canvas._flash_alpha > 0
+    canvas.set_countdown(3)
+    assert canvas._countdown == 3
+    canvas.set_interval_status(True, remaining_s=4, shot_count=2)
+    qt_app.processEvents()
+    assert canvas.interval_hud.isVisible()
+    assert "已拍 2 张" in canvas._interval_label.text()
+    canvas.stop_interval_button.click()
+    assert stopped == [True]
+    canvas.set_interval_status(False)
+    assert not canvas.interval_hud.isVisible()
+    canvas.close()
+    qt_app.processEvents()
+

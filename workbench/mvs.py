@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes as C
 import logging
 import os
+import platform
 import sys
 import time
 from dataclasses import dataclass
@@ -19,6 +20,9 @@ USB_DEVICE = 4  # MV_USB_DEVICE
 MONO8 = 0x01080001  # PixelType_Gvsp_Mono8
 NO_DATA = 0x80000007  # MV_E_NODATA
 USB_DRIVER_ERROR = 0x80000305  # MV_E_USB_DRIVER
+DOWNLOAD_URL = "https://www.hikrobotics.com/cn/machinevision/service/download/"
+
+_custom_library_path = ""
 
 
 class MvsError(RuntimeError):
@@ -159,21 +163,67 @@ class FloatValue(C.Structure):
     ]
 
 
-def _library_path():
-    override = os.environ.get("VANNUS_MVS_LIBRARY")
-    if override:
-        return Path(override).expanduser().resolve()
+def normalize_library_path(raw):
+    path = Path(str(raw).strip()).expanduser()
+    if sys.platform == "darwin" and path.is_dir() and (path / "MvCameraControl").is_file():
+        path = path / "MvCameraControl"
+    return path.resolve()
+
+
+def set_custom_library_path(path):
+    global _custom_library_path
+    _custom_library_path = str(path).strip() if path else ""
+    return _custom_library_path
+
+
+def get_custom_library_path():
+    return _custom_library_path
+
+
+def platform_guide():
+    arch = platform.machine().lower()
     if sys.platform == "darwin":
-        return Path("/Library/Frameworks/MvCameraControl.framework/MvCameraControl")
+        if arch in ("arm64", "aarch64"):
+            return (
+                "当前系统：macOS Apple Silicon (arm64)。请在海康官网下载 MVS 客户端 "
+                "macOS arm64 版本并安装（默认安装至 /Library/Frameworks/MvCameraControl.framework）。"
+            )
+        return (
+            "当前系统：macOS Intel (x86_64)。请在海康官网下载 MVS 客户端 "
+            "macOS x86_64 版本并安装（默认安装至 /Library/Frameworks/MvCameraControl.framework）。"
+        )
+    if sys.platform == "win32":
+        return (
+            "当前系统：Windows x64。请在海康官网下载 MVS 客户端 Windows 64 位安装包，"
+            "安装时请勾选 USB3 Vision 驱动。"
+        )
+    return "当前系统暂未提供海康 MVS 接入，仍可正常使用普通 USB 摄像头。"
+
+
+def library_location():
+    override = os.environ.get("VANNUS_MVS_LIBRARY", "").strip()
+    if override:
+        return normalize_library_path(override), "env"
+    if _custom_library_path:
+        return normalize_library_path(_custom_library_path), "custom"
+    if sys.platform == "darwin":
+        return Path("/Library/Frameworks/MvCameraControl.framework/MvCameraControl"), "default"
     if sys.platform == "win32":
         for variable in ("CommonProgramFiles(x86)", "CommonProgramW6432", "CommonProgramFiles"):
             root = os.environ.get(variable)
             if root:
                 path = Path(root) / "MVS" / "Runtime" / "Win64_x64" / "MvCameraControl.dll"
                 if path.is_file():
-                    return path
-        return Path("MvCameraControl.dll")
-    raise MvsError("当前系统未提供海康 MVS 接入")
+                    return path, "default"
+        return Path("MvCameraControl.dll"), "default"
+    return None, "unsupported"
+
+
+def _library_path():
+    path, _ = library_location()
+    if path is None:
+        raise MvsError("当前系统未提供海康 MVS 接入")
+    return path
 
 
 def _check(code, message):
@@ -195,7 +245,13 @@ class MvsSdk:
             self._bind()
         except (OSError, AttributeError) as error:
             self.close()
-            raise MvsError("无法加载海康 MVS SDK，请安装匹配系统架构的 MVS 和 USB3 Vision 驱动") from error
+            if path.is_absolute() and not path.exists():
+                raise MvsError(
+                    "未找到海康 MVS SDK，请下载安装 MVS 或在「设置」中指定本地 SDK 路径"
+                ) from error
+            raise MvsError(
+                "无法加载海康 MVS SDK，请安装匹配系统架构的 MVS 和 USB3 Vision 驱动"
+            ) from error
 
     def _bind(self):
         handle, key, uint, ptr = C.c_void_p, C.c_char_p, C.c_uint32, C.POINTER

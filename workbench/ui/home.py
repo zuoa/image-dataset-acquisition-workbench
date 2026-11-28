@@ -1,24 +1,48 @@
 import shutil
 from datetime import timezone
+from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
-    QLabel,
     QListView,
+    QStyle,
     QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, LineEdit, PrimaryPushButton, PushButton, ScrollArea, SubtitleLabel
+from qfluentwidgets import (
+    BodyLabel,
+    PrimaryPushButton,
+    ProgressBar,
+    PushButton,
+    ScrollArea,
+    SearchLineEdit,
+    SubtitleLabel,
+)
 from qfluentwidgets import FluentIcon as FIF
 
 from ..timeutils import display_now, format_datetime
 from .common import FormDialog, confirm, heading, menu_button, muted
 from .models import ROLE, MediaModel, media_title
-from .theme import INK, TONES, MetricCard, SoftCard
+from .theme import (
+    BLUE,
+    BORDER,
+    BORDER_SUBTLE,
+    CANVAS_EMPTY,
+    INK,
+    MUTED,
+    RADIUS_INNER,
+    SURFACE,
+    SURFACE_HOVER,
+    SURFACE_SUBTLE,
+    TONES,
+    MetricCard,
+    SoftCard,
+    StatusPill,
+)
 from .typography import interface_font
 
 
@@ -26,20 +50,56 @@ class ColorIcon(QWidget):
     def __init__(self, icon, tone, parent=None):
         super().__init__(parent)
         self.icon, self.tone = icon, tone
-        self.setFixedSize(44, 44)
+        self.setFixedSize(40, 40)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(self.tone[0]))
-        painter.drawRoundedRect(QRectF(self.rect()), 13, 13)
-        self.icon.render(painter, QRectF(12, 12, 20, 20), fill=self.tone[1])
+        painter.drawRoundedRect(QRectF(self.rect()), 12, 12)
+        self.icon.render(painter, QRectF(11, 11, 18, 18), fill=self.tone[1])
+
+
+class CoverImage(QWidget):
+    """Aspect-fill, rounded-clipped dataset cover thumbnail."""
+
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent)
+        self.pixmap = pixmap
+        self.setFixedHeight(108)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        clip = QPainterPath()
+        clip.addRoundedRect(rect, RADIUS_INNER, RADIUS_INNER)
+        painter.save()
+        painter.setClipPath(clip)
+        painter.fillRect(rect, QColor(CANVAS_EMPTY))
+        if self.pixmap and not self.pixmap.isNull():
+            pw, ph = self.pixmap.width(), self.pixmap.height()
+            if pw > 0 and ph > 0:
+                scale = max(rect.width() / pw, rect.height() / ph)
+                draw_w, draw_h = pw * scale, ph * scale
+                target = QRectF(
+                    rect.x() + (rect.width() - draw_w) / 2,
+                    rect.y() + (rect.height() - draw_h) / 2,
+                    draw_w,
+                    draw_h,
+                )
+                painter.drawPixmap(target, self.pixmap, QRectF(self.pixmap.rect()))
+        painter.restore()
+        painter.setPen(QPen(QColor(BORDER_SUBTLE), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect, RADIUS_INNER, RADIUS_INNER)
 
 
 class RecentDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
-        return QSize(240, 76)
+        return QSize(236, 64)
 
     def paint(self, painter, option, index):
         row = index.data(ROLE)
@@ -48,30 +108,39 @@ class RecentDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(option.rect)
-        thumb = QRectF(rect.x(), rect.y() + 12, 48, 48)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#F1F4FB"))
-        painter.drawRoundedRect(thumb, 13, 13)
+        if option.state & QStyle.StateFlag.State_MouseOver:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(SURFACE_HOVER))
+            painter.drawRoundedRect(rect.adjusted(0, 2, 0, -2), 10, 10)
+        thumb = QRectF(rect.x() + 6, rect.y() + 10, 44, 44)
+        clip = QPainterPath()
+        clip.addRoundedRect(thumb, 10, 10)
+        painter.save()
+        painter.setClipPath(clip)
+        painter.fillRect(thumb, QColor(SURFACE_SUBTLE))
         pixmap = index.data(Qt.ItemDataRole.DecorationRole)
         if pixmap and not pixmap.isNull():
-            painter.drawPixmap(thumb.toRect().adjusted(3, 3, -3, -3), pixmap, pixmap.rect())
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.drawPixmap(thumb.toRect(), pixmap, pixmap.rect())
         else:
             icon = FIF.VIDEO if row.get("media_type") == "video" else FIF.PHOTO
-            icon.render(painter, thumb.adjusted(15, 15, -15, -15), fill="#AAB9DB")
-        painter.setFont(interface_font(16))
+            icon.render(painter, thumb.adjusted(13, 13, -13, -13), fill=BLUE)
+        painter.restore()
+
+        painter.setFont(interface_font(14, interface_font().Weight.Medium))
         painter.setPen(QColor(INK))
-        width = max(20, round(rect.width() - 62))
+        width = max(20, round(rect.width() - 66))
         title = media_title(row)
         painter.drawText(
-            QRectF(rect.x() + 62, rect.y() + 13, width, 24),
+            QRectF(rect.x() + 60, rect.y() + 11, width, 21),
             painter.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, width),
         )
-        painter.setFont(interface_font(13))
-        painter.setPen(QColor("#9CA1B4"))
+        painter.setFont(interface_font(12))
+        painter.setPen(QColor(MUTED))
         date = format_datetime(row["created_at"], "%m/%d %H:%M")
         text = f"{row['dataset_name']} · {date}"
         painter.drawText(
-            QRectF(rect.x() + 62, rect.y() + 40, width, 22),
+            QRectF(rect.x() + 60, rect.y() + 34, width, 18),
             painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, width),
         )
         painter.restore()
@@ -85,20 +154,26 @@ class HomePage(QWidget):
         super().__init__()
         self.app = app
         self.setObjectName("datasets")
+        self._datasets = []
+        self._cover_cache = {}
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 28, 32, 26)
-        layout.setSpacing(24)
+        layout.setContentsMargins(28, 24, 28, 22)
+        layout.setSpacing(18)
+
         header = QHBoxLayout()
+        header.setSpacing(10)
         header.addWidget(heading("数据集工作台", "连接相机，采集并整理实验图像。"), 1)
-        import_button = PushButton("导入归档")
+        import_button = PushButton(FIF.DOWNLOAD, "导入归档")
         import_button.clicked.connect(app.import_archive)
         header.addWidget(import_button)
         create = PrimaryPushButton(FIF.ADD, "新建数据集")
         create.clicked.connect(self.create_dataset)
         header.addWidget(create)
         layout.addLayout(header)
+
         metrics = QHBoxLayout()
-        metrics.setSpacing(16)
+        metrics.setSpacing(14)
         self.metrics = []
         for title, icon, tone in zip(
             ["数据集", "原始图片", "今日新增", "已归档"], [FIF.FOLDER, FIF.PHOTO, FIF.CAMERA, FIF.SAVE], TONES
@@ -106,29 +181,41 @@ class HomePage(QWidget):
             card = MetricCard(title, icon, tone)
             self.metrics.append(card)
             metrics.addWidget(card, 1)
+        self.metrics[0].set_clickable(True)
+        self.metrics[0].clicked.connect(lambda: self.search.setFocus())
+        self.metrics[1].set_clickable(True)
+        self.metrics[1].clicked.connect(self._browse_first_dataset)
+        self.metrics[2].set_clickable(True)
+        self.metrics[2].clicked.connect(self._browse_first_dataset)
         layout.addLayout(metrics)
 
         body = QHBoxLayout()
-        body.setSpacing(24)
+        body.setSpacing(20)
+
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
-        ll.setSpacing(18)
+        ll.setSpacing(14)
         row = QHBoxLayout()
         row.addWidget(SubtitleLabel("我的数据集"), 1)
-        self.search = LineEdit()
-        self.search.setPlaceholderText("搜索数据集")
+        self.search = SearchLineEdit()
+        self.search.setPlaceholderText("搜索数据集或标签")
         self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(210)
-        self.search.textChanged.connect(self.refresh)
+        self.search.setFixedWidth(232)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(180)
+        self._search_timer.timeout.connect(self._render_dataset_grid)
+        self.search.textChanged.connect(lambda: self._search_timer.start())
         row.addWidget(self.search)
         ll.addLayout(row)
+
         scroll = ScrollArea()
         scroll.setWidgetResizable(True)
         self.content = QWidget()
         self.grid = QGridLayout(self.content)
-        self.grid.setContentsMargins(2, 2, 2, 10)
-        self.grid.setSpacing(18)
+        self.grid.setContentsMargins(2, 2, 4, 8)
+        self.grid.setSpacing(16)
         scroll.setWidget(self.content)
         ll.addWidget(scroll, 1)
         self.summary = muted("")
@@ -136,17 +223,18 @@ class HomePage(QWidget):
         body.addWidget(left, 1)
 
         aside = QWidget()
-        aside.setFixedWidth(284)
+        aside.setFixedWidth(280)
         al = QVBoxLayout(aside)
         al.setContentsMargins(0, 0, 0, 0)
-        al.setSpacing(22)
+        al.setSpacing(16)
+
         recent = SoftCard()
         box = QVBoxLayout(recent)
-        box.setContentsMargins(22, 22, 22, 18)
-        box.setSpacing(16)
+        box.setContentsMargins(18, 18, 18, 14)
+        box.setSpacing(12)
         top = QHBoxLayout()
         top.addWidget(SubtitleLabel("最近采集"), 1)
-        self.all_recent = PushButton("全部")
+        self.all_recent = PushButton(FIF.VIEW, "全部")
         self.all_recent.clicked.connect(self.browse_recent)
         top.addWidget(self.all_recent)
         box.addLayout(top)
@@ -156,31 +244,44 @@ class HomePage(QWidget):
         self.recent_view.setModel(self.recent_model)
         self.recent_view.setItemDelegate(RecentDelegate(self))
         self.recent_view.setUniformItemSizes(True)
-        self.recent_view.setFixedHeight(305)
+        self.recent_view.setMouseTracking(True)
+        self.recent_view.setFixedHeight(272)
         self.recent_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.recent_view.doubleClicked.connect(lambda i: app.show_media(i.data(ROLE)))
         box.addWidget(self.recent_view)
         self.no_recent = muted("还没有采集记录。\n新建一个数据集，开始记录第一张图像。")
-        self.no_recent.setMinimumHeight(120)
+        self.no_recent.setMinimumHeight(100)
         box.addWidget(self.no_recent)
         al.addWidget(recent)
-        workspace_card = SoftCard(tint="#EFF4FF", shadow=False)
+
+        workspace_card = SoftCard(tint="#ECE8E0", border=BORDER, shadow=False)
         box = QVBoxLayout(workspace_card)
-        box.setContentsMargins(22, 22, 22, 22)
-        box.setSpacing(12)
-        box.addWidget(ColorIcon(FIF.FOLDER, TONES[3]))
-        box.addWidget(SubtitleLabel("本地工作区"))
+        box.setContentsMargins(18, 18, 18, 18)
+        box.setSpacing(10)
+        top_ws = QHBoxLayout()
+        top_ws.setSpacing(10)
+        top_ws.addWidget(ColorIcon(FIF.FOLDER, (SURFACE, BLUE)))
+        top_ws.addWidget(SubtitleLabel("本地工作区"), 1)
+        box.addLayout(top_ws)
         box.addWidget(muted("图像保存在本机，离线也能继续采集。"))
+        self.disk_progress = ProgressBar()
+        self.disk_progress.setRange(0, 100)
+        box.addWidget(self.disk_progress)
         self.free_space = muted("")
         box.addWidget(self.free_space)
-        open_workspace = PushButton("打开文件夹")
+        open_workspace = PushButton(FIF.FOLDER, "打开文件夹")
         open_workspace.clicked.connect(lambda: app.open_path(app.workspace.root))
         box.addWidget(open_workspace)
         al.addWidget(workspace_card)
         al.addStretch()
+
         body.addWidget(aside)
         layout.addLayout(body, 1)
         self.refresh()
+
+    def _browse_first_dataset(self):
+        if self._datasets:
+            self.browse.emit(self._datasets[0]["id"])
 
     def browse_recent(self):
         if self.recent_model.rows:
@@ -222,8 +323,30 @@ class HomePage(QWidget):
         self.app.workspace.archive_dataset(data["id"], not data["archived"])
         self.app.refresh()
 
+    def _load_cover(self, rel_path):
+        if not rel_path:
+            return None
+        full_path = Path(self.app.workspace.path(rel_path))
+        try:
+            key = (str(full_path), full_path.stat().st_mtime_ns)
+        except OSError:
+            return None
+        cached = self._cover_cache.get(key)
+        if cached is not None:
+            return cached
+        pixmap = QPixmap(str(full_path))
+        if not pixmap.isNull():
+            pixmap = pixmap.scaled(
+                520, 260, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
+            )
+        if len(self._cover_cache) > 64:
+            self._cover_cache.clear()
+        self._cover_cache[key] = pixmap
+        return pixmap
+
     def refresh(self):
-        datasets = self.app.workspace.datasets()
+        self._datasets = self.app.workspace.datasets()
+        datasets = self._datasets
         total = sum(data["count"] for data in datasets)
         midnight = display_now().replace(hour=0, minute=0, second=0, microsecond=0)
         today = self.app.workspace.count_photos(date_from=midnight.astimezone(timezone.utc).isoformat())
@@ -234,13 +357,20 @@ class HomePage(QWidget):
         self.summary.setText(
             f"{len(datasets)} 个数据集 · {total:,} 张原图 · {video_total:,} 段视频 · 本地保存"
         )
+        usage = shutil.disk_usage(self.app.workspace.root)
+        used_pct = round(usage.used / max(usage.total, 1) * 100)
+        self.disk_progress.setValue(used_pct)
         self.free_space.setText(
-            f"磁盘可用 {shutil.disk_usage(self.app.workspace.root).free / 1024**3:.1f} GB"
+            f"磁盘可用 {usage.free / 1024**3:.1f} GB（已用 {used_pct}%）"
         )
         self.recent_model.reload()
         self.recent_view.setVisible(total + video_total > 0)
         self.all_recent.setVisible(total + video_total > 0)
         self.no_recent.setVisible(total + video_total == 0)
+        self._render_dataset_grid()
+
+    def _render_dataset_grid(self):
+        datasets = self._datasets
         while self.grid.count():
             item = self.grid.takeAt(0)
             if item.widget():
@@ -250,8 +380,8 @@ class HomePage(QWidget):
         if not rows:
             card = SoftCard()
             box = QVBoxLayout(card)
-            box.setContentsMargins(28, 34, 28, 34)
-            box.setSpacing(16)
+            box.setContentsMargins(26, 30, 26, 30)
+            box.setSpacing(12)
             box.addWidget(ColorIcon(FIF.ADD, TONES[0]))
             box.addWidget(SubtitleLabel("建立第一个数据集" if not datasets else "没有匹配的数据集"))
             box.addWidget(
@@ -259,6 +389,10 @@ class HomePage(QWidget):
                     "点击右上角「新建数据集」，开始采集实验图像。" if not datasets else "试试其他名称或标签。"
                 )
             )
+            if not datasets:
+                cta = PrimaryPushButton(FIF.ADD, "新建数据集")
+                cta.clicked.connect(self.create_dataset)
+                box.addWidget(cta, alignment=Qt.AlignmentFlag.AlignLeft)
             self.grid.addWidget(card, 0, 0, 1, 2)
         else:
             for index, data in enumerate(rows):
@@ -269,58 +403,55 @@ class HomePage(QWidget):
 
     def _card(self, data, tone):
         card = SoftCard()
-        card.setMinimumWidth(245)
+        card.setMinimumWidth(240)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(22, 22, 22, 22)
-        layout.setSpacing(15)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
         row = QHBoxLayout()
+        row.setSpacing(10)
         row.addWidget(ColorIcon(FIF.FOLDER, tone))
         title = SubtitleLabel(data["name"])
         title.setWordWrap(True)
-        title.setMaximumHeight(60)
+        title.setMaximumHeight(48)
         title.setToolTip(data["name"])
         row.addWidget(title, 1)
         row.addWidget(
             menu_button(
                 "数据集操作",
                 [
-                    ("编辑", lambda: self.edit_dataset(data)),
-                    ("取消归档" if data["archived"] else "归档", lambda: self.toggle_archive(data)),
-                    ("移入回收站", lambda: self.delete_dataset(data)),
+                    (FIF.EDIT, "编辑", lambda: self.edit_dataset(data)),
+                    (FIF.SAVE, "取消归档" if data["archived"] else "归档", lambda: self.toggle_archive(data)),
+                    (FIF.DELETE, "移入回收站", lambda: self.delete_dataset(data)),
                 ],
                 compact=True,
             )
         )
         layout.addLayout(row)
-        if data["cover"]:
-            cover = QLabel()
-            cover.setFixedHeight(105)
-            cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            image = QPixmap(str(self.app.workspace.path(data["cover"])))
-            cover.setPixmap(
-                image.scaled(
-                    320, 105, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-                )
-            )
-            layout.addWidget(cover)
+        cover_pixmap = self._load_cover(data["cover"])
+        if cover_pixmap is not None:
+            layout.addWidget(CoverImage(cover_pixmap))
         description = muted(data["description"] or data["tags"] or "尚未添加说明")
-        description.setMaximumHeight(46)
+        description.setMaximumHeight(40)
         description.setToolTip(data["description"] or data["tags"])
         layout.addWidget(description)
         layout.addStretch()
+        meta_row = QHBoxLayout()
+        meta_row.setSpacing(8)
         count = BodyLabel(
             f"{data['count']:,} 张图片"
             + (f" · {data['video_count']:,} 段视频" if data["video_count"] else "")
         )
-        layout.addWidget(count)
+        meta_row.addWidget(count, 1)
         if data["archived"]:
-            layout.addWidget(muted("已归档"))
+            meta_row.addWidget(StatusPill("已归档", "neutral", dot=False, icon=FIF.SAVE))
+        layout.addLayout(meta_row)
         buttons = QHBoxLayout()
-        capture = PushButton("采集")
+        buttons.setSpacing(8)
+        capture = PushButton(FIF.CAMERA, "采集")
         capture.setProperty("softAction", True)
         capture.setEnabled(not data["archived"])
         capture.clicked.connect(lambda: self.acquire.emit(data["id"]))
-        browse = PushButton("查看素材")
+        browse = PushButton(FIF.PHOTO, "查看素材")
         browse.clicked.connect(lambda: self.browse.emit(data["id"]))
         buttons.addWidget(capture)
         buttons.addWidget(browse)

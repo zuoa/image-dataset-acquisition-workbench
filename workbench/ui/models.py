@@ -9,6 +9,7 @@ from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
     QObject,
+    QPointF,
     QRectF,
     QRunnable,
     QSize,
@@ -17,12 +18,37 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QImage,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate
 from qfluentwidgets import FluentIcon as FIF
 
 from ..storage import photo_preview
 from .common import video_duration
+from .theme import (
+    BLUE,
+    BORDER,
+    BORDER_STRONG,
+    CANVAS_DARK,
+    CANVAS_EMPTY,
+    INK,
+    INK_SECONDARY,
+    MUTED,
+    RADIUS_CARD,
+    RADIUS_INNER,
+    SURFACE,
+    SURFACE_HOVER,
+    SURFACE_TINT,
+)
+from .typography import interface_font
 
 ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -165,11 +191,11 @@ class MediaModel(PhotoModel):
 class PhotoDelegate(QStyledItemDelegate):
     def __init__(self, parent=None, compact=False):
         super().__init__(parent)
-        self.card_width = 230
+        self.card_width = 220
         self.compact = compact
 
     def sizeHint(self, option, index):
-        return QSize(self.card_width, 126 if self.compact else round(self.card_width * 0.68) + 77)
+        return QSize(self.card_width, 118 if self.compact else round(self.card_width * 0.66) + 64)
 
     def paint(self, painter, option, index):
         painter.save()
@@ -177,65 +203,104 @@ class PhotoDelegate(QStyledItemDelegate):
         rect = option.rect.adjusted(5, 5, -5, -5)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
-        painter.setBrush(QColor("#EDF3FF" if selected else "#FFFFFF"))
+
+        painter.setBrush(QColor(SURFACE_TINT if selected else SURFACE_HOVER if hovered else SURFACE))
         painter.setPen(
-            QPen(QColor("#3978F6" if selected else "#D6E2FE" if hovered else "#F0F1F7"), 2 if selected else 1)
+            QPen(
+                QColor(BLUE if selected else BORDER_STRONG if hovered else BORDER),
+                2 if selected else 1,
+            )
         )
-        painter.drawRoundedRect(rect, 16, 16)
-        image_rect = rect.adjusted(7, 7, -7, -39 if self.compact else -66)
-        painter.fillRect(image_rect, QColor("#E8EEF2"))
-        pixmap = index.data(Qt.ItemDataRole.DecorationRole)
-        if pixmap and not pixmap.isNull():
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            painter.drawPixmap(image_rect, pixmap, pixmap.rect())
+        painter.drawRoundedRect(QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5), RADIUS_CARD - 2, RADIUS_CARD - 2)
+
+        image_rect = rect.adjusted(7, 7, -7, -34 if self.compact else -56)
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(image_rect), RADIUS_INNER, RADIUS_INNER)
+
         row = index.data(ROLE)
-        video = row and row.get("media_type") == "video"
+        video = bool(row and row.get("media_type") == "video")
+        pixmap = index.data(Qt.ItemDataRole.DecorationRole)
+
+        painter.save()
+        painter.setClipPath(clip)
         if video:
-            painter.fillRect(image_rect, QColor("#ECF3FF"))
+            gradient = QLinearGradient(image_rect.topLeft(), image_rect.bottomLeft())
+            gradient.setColorAt(0.0, QColor("#EAEFF2"))
+            gradient.setColorAt(1.0, QColor("#DCE4EA"))
+            painter.fillRect(image_rect, gradient)
             center = image_rect.center()
+            circle = QRectF(center.x() - 22, center.y() - 22, 44, 44)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(253, 252, 250, 224))
+            painter.drawEllipse(circle)
             FIF.VIDEO.render(
                 painter,
-                QRectF(center.x() - 20, center.y() - 20, 40, 40),
-                fill="#6291F6",
+                QRectF(center.x() - 10, center.y() - 10, 20, 20),
+                fill=BLUE,
             )
+        else:
+            painter.fillRect(image_rect, QColor(CANVAS_EMPTY))
+            if pixmap and not pixmap.isNull():
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                painter.drawPixmap(image_rect, pixmap, pixmap.rect())
+        painter.restore()
+
         if row and row.get("media_type"):
-            badge = image_rect.adjusted(8, 8, 0, 0)
-            badge.setSize(QSize(44, 24))
+            badge = QRectF(image_rect.x() + 7, image_rect.y() + 7, 38, 21)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#FFFFFF"))
+            painter.setBrush(QColor(253, 252, 250, 232))
             painter.drawRoundedRect(badge, 6, 6)
-            font = QFont(option.font)
-            font.setPixelSize(12)
-            painter.setFont(font)
-            painter.setPen(QColor("#3978F6" if video else "#647487"))
+            painter.setFont(interface_font(11, QFont.Weight.Medium))
+            painter.setPen(QColor(BLUE if video else INK_SECONDARY))
             painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, "视频" if video else "图片")
+
+        if video and row:
+            dur_text = video_duration(row["duration_ms"])
+            painter.setFont(interface_font(11, QFont.Weight.Medium))
+            dur_w = painter.fontMetrics().horizontalAdvance(dur_text) + 12
+            dur_rect = QRectF(image_rect.right() - dur_w - 6, image_rect.bottom() - 25, dur_w, 20)
+            painter.setPen(Qt.PenStyle.NoPen)
+            dark_pill = QColor(CANVAS_DARK)
+            dark_pill.setAlpha(196)
+            painter.setBrush(dark_pill)
+            painter.drawRoundedRect(dur_rect, 6, 6)
+            painter.setPen(QColor("#FDFCFA"))
+            painter.drawText(dur_rect, Qt.AlignmentFlag.AlignCenter, dur_text)
+
+        if selected:
+            check_rect = QRectF(image_rect.right() - 26, image_rect.top() + 7, 20, 20)
+            painter.setPen(QPen(QColor("#FDFCFA"), 1.5))
+            painter.setBrush(QColor(BLUE))
+            painter.drawEllipse(check_rect)
+            pen = QPen(QColor("#FDFCFA"), 1.8)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            cx, cy = check_rect.center().x(), check_rect.center().y()
+            painter.drawPolyline([QPointF(cx - 4, cy), QPointF(cx - 1, cy + 3), QPointF(cx + 4.5, cy - 3)])
+
         if row:
-            font = QFont(option.font)
-            font.setPixelSize(17)
-            font.setWeight(QFont.Weight.Medium)
-            painter.setFont(font)
-            painter.setPen(QColor("#182532"))
+            painter.setFont(interface_font(13 if self.compact else 14, QFont.Weight.Medium))
+            painter.setPen(QColor(INK))
             title = media_title(row)
-            text_rect = rect.adjusted(12, rect.height() - (33 if self.compact else 59), -12, 0)
+            text_rect = rect.adjusted(10, rect.height() - (28 if self.compact else 49), -10, 0)
             painter.drawText(
                 text_rect,
                 Qt.AlignmentFlag.AlignTop,
                 painter.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, text_rect.width()),
             )
             if not self.compact:
-                font.setPixelSize(14)
-                font.setWeight(QFont.Weight.Normal)
-                painter.setFont(font)
-                painter.setPen(QColor("#647487"))
+                painter.setFont(interface_font(12))
+                painter.setPen(QColor(MUTED))
                 dimensions = (
                     video_duration(row["duration_ms"]) if video else f"{row['width']} × {row['height']}"
                 )
-                subtitle = f"{dimensions}  ·  {row['batch_name']}"
+                subtitle = f"{dimensions} · {row['batch_name']}"
                 painter.drawText(
-                    rect.adjusted(12, rect.height() - 34, -12, 0),
+                    rect.adjusted(10, rect.height() - 27, -10, 0),
                     Qt.AlignmentFlag.AlignTop,
                     painter.fontMetrics().elidedText(
-                        subtitle, Qt.TextElideMode.ElideRight, rect.width() - 24
+                        subtitle, Qt.TextElideMode.ElideRight, rect.width() - 20
                     ),
                 )
         painter.restore()

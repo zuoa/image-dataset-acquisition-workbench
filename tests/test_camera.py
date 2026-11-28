@@ -126,6 +126,37 @@ def test_slow_conversion_keeps_gui_responsive_and_discards_disconnected_result(
         qt_app.processEvents()
 
 
+def test_mvs_library_location_precedence_and_framework_normalization(monkeypatch, tmp_path):
+    monkeypatch.delenv("VANNUS_MVS_LIBRARY", raising=False)
+    monkeypatch.setattr(mvs, "_custom_library_path", "")
+
+    assert "hikrobotics.com/cn/" in mvs.DOWNLOAD_URL
+    assert mvs.platform_guide()
+
+    path, source = mvs.library_location()
+    assert source == "default"
+    assert path is not None
+
+    framework = tmp_path / "MvCameraControl.framework"
+    framework.mkdir()
+    binary = framework / "MvCameraControl"
+    binary.write_bytes(b"placeholder")
+
+    mvs.set_custom_library_path(framework)
+    path, source = mvs.library_location()
+    assert source == "custom"
+    if mvs.sys.platform == "darwin":
+        assert path == binary.resolve()
+    else:
+        assert path == framework.resolve()
+
+    env_path = tmp_path / "override-lib"
+    monkeypatch.setenv("VANNUS_MVS_LIBRARY", str(env_path))
+    path, source = mvs.library_location()
+    assert source == "env"
+    assert path == env_path.resolve()
+
+
 def test_mvs_missing_library_leaves_native_inputs_available(qt_app, monkeypatch, tmp_path):
     monkeypatch.setenv("VANNUS_MVS_LIBRARY", str(tmp_path / "missing-mvs-library"))
     controller = camera.CameraController()

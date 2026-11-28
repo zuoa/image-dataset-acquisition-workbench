@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QLockFile, QRect, QStandardPaths, Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QKeySequence, QShortcut
-from PySide6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QMessageBox, QVBoxLayout
 from qfluentwidgets import (
     BodyLabel,
     FluentWindow,
@@ -29,6 +29,7 @@ from qfluentwidgets import (
     FluentIcon as FIF,
 )
 
+from . import mvs
 from .branding import ICON_PATH, NAME, TITLE, configure_application
 from .feedback import CaptureFeedback
 from .jobs import TaskRunner
@@ -39,7 +40,7 @@ from .ui.home import HomePage
 from .ui.library import LibraryPage, PhotoDialog
 from .ui.navigation import SidebarBrand, SidebarItem
 from .ui.settings import SettingsPage, TrashPage
-from .ui.theme import BACKGROUND, BLUE
+from .ui.theme import BACKGROUND, BLUE, SIDEBAR_BG, SoftCard
 from .ui.typography import install_typography
 
 
@@ -50,6 +51,7 @@ class MainWindow(FluentWindow):
         super().__init__()
         self.workspace = workspace
         self.preferences = preferences
+        mvs.set_custom_library_path(preferences.value("mvs/library_path", "", type=str))
         self.log_dir = log_dir
         self.workspace_lock = workspace_lock
         self.runner = TaskRunner(self)
@@ -62,7 +64,7 @@ class MainWindow(FluentWindow):
         self.setMinimumSize(1200, 800)
         self.setWindowIcon(QIcon(str(ICON_PATH)))
         self.setMicaEffectEnabled(False)
-        self.setCustomBackgroundColor("#FFFFFF", "#FFFFFF")
+        self.setCustomBackgroundColor(SIDEBAR_BG, SIDEBAR_BG)
         self.titleBar.titleLabel.hide()
         self.titleBar.iconLabel.hide()
         if sys.platform == "darwin":
@@ -94,21 +96,23 @@ class MainWindow(FluentWindow):
         self.setStyleSheet(self.styleSheet() + STYLE)
         surface = f"StackedWidget {{ background: {BACKGROUND}; border: none; border-top-left-radius: 28px; }}"
         setCustomStyleSheet(self.stackedWidget, surface, surface)
-        sidebar_style = "NavigationPanel {background: #FFFFFF; border: none;}"
+        sidebar_style = f"NavigationPanel {{background: {SIDEBAR_BG}; border: none;}}"
         setCustomStyleSheet(self.navigationInterface.panel, sidebar_style, sidebar_style)
         self.stackedWidget.currentChanged.connect(self._page_changed)
         self.space = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         self.space.setAutoRepeat(False)
         self.space.activated.connect(self._space_capture)
-        # A single persistent task bar is shared across all pages.
-        self.task_bar = QWidget(self)
-        self.task_bar.setObjectName("panel")
+        # A single persistent task bar is shared across all pages for long-running jobs.
+        self.task_bar = SoftCard(self)
         bar = QVBoxLayout(self.task_bar)
-        bar.setContentsMargins(18, 12, 18, 12)
+        bar.setContentsMargins(16, 12, 16, 12)
+        bar.setSpacing(8)
         row = QHBoxLayout()
+        row.setSpacing(10)
         self.task_text = BodyLabel("")
         row.addWidget(self.task_text, 1)
-        cancel = PushButton("取消任务")
+        cancel = PushButton(FIF.CLOSE, "取消")
+        cancel.setProperty("dangerAction", True)
         cancel.clicked.connect(self.runner.cancel)
         row.addWidget(cancel)
         bar.addLayout(row)
@@ -207,8 +211,9 @@ class MainWindow(FluentWindow):
     def _busy_changed(self, busy):
         saving_photo = busy and self._photo_capture
         self.capture.camera.set_saving_photo(saving_photo)
-        self.task_bar.setVisible(busy)
-        self.task_bar.raise_()
+        self.task_bar.setVisible(busy and not saving_photo)
+        if busy and not saving_photo:
+            self.task_bar.raise_()
         self.stackedWidget.setEnabled(not busy or saving_photo)
         self.navigationInterface.setEnabled(not busy and not self.capture.camera.video_busy)
         if not busy:
@@ -219,8 +224,10 @@ class MainWindow(FluentWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, "task_bar"):
+            width = min(440, max(300, self.width() - 260))
+            height = 84
             self.task_bar.setGeometry(
-                max(210, self.width() // 3), self.height() - 105, min(660, self.width() - 240), 86
+                max(220, self.width() - width - 24), self.height() - height - 24, width, height
             )
 
     def open_capture(self, dataset_id, batch_id=None):
@@ -231,18 +238,24 @@ class MainWindow(FluentWindow):
         self.library.select_dataset(dataset_id, media_type, batch_id)
         self.switchTo(self.library)
 
-    def show_media(self, item):
+    def open_settings(self):
+        self.switchTo(self.settings)
+
+    def show_media(self, item, *, photos=None, index=0):
         if item and item.get("media_type") == "video":
             self.open_path(self.workspace.path(item["original"]))
         else:
-            self.show_photo(item)
+            self.show_photo(item, photos=photos, index=index)
 
-    def show_photo(self, photo):
+    def show_photo(self, photo, *, photos=None, index=0):
         if photo:
-            PhotoDialog(self, self.workspace.photo(photo["id"])).exec()
+            PhotoDialog(self, self.workspace.photo(photo["id"]), photos=photos, index=index).exec()
 
     def open_path(self, path):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def open_url(self, url):
+        QDesktopServices.openUrl(QUrl(url))
 
     def import_archive(self):
         path, _ = QFileDialog.getOpenFileName(self, "导入完整数据集归档", "", "ZIP 归档 (*.zip)")

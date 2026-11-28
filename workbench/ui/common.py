@@ -1,12 +1,14 @@
 import json
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QPushButton,
     QSizePolicy,
     QTableWidgetItem,
@@ -18,7 +20,6 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     DropDownPushButton,
-    DropDownToolButton,
     LineEdit,
     MessageBox,
     MessageBoxBase,
@@ -27,7 +28,7 @@ from qfluentwidgets import (
     SubtitleLabel,
     TableWidget,
     TextEdit,
-    TransparentPushButton,
+    ToolButton,
 )
 from qfluentwidgets import (
     ComboBox as FluentComboBox,
@@ -40,17 +41,51 @@ from qfluentwidgets import (
     SpinBox as FluentSpinBox,
 )
 
+from .theme import (
+    BORDER,
+    BORDER_SUBTLE,
+    DANGER,
+    INK,
+    INK_SECONDARY,
+    MUTED,
+    RADIUS_CARD,
+    SURFACE,
+    SURFACE_SUBTLE,
+)
 from .theme import SoftCard as CardWidget
 
-STYLE = """
-QLabel#muted { color: #8C91A5; }
-QLabel#pageTitle { color: #252B43; font-size: 28px; font-weight: 500; }
-QLabel#bigNumber { color: #182532; font-size: 25px; font-weight: 600; }
-QListView#gallery { background: transparent; border: none; outline: none; }
-QWidget#panel { background: #FFFFFF; border: 1px solid #ECEEF6; border-radius: 20px; }
-QScrollArea { background: transparent; border: none; }
-QScrollArea > QWidget > QWidget { background: transparent; }
+STYLE = f"""
+QLabel#muted {{ color: {MUTED}; }}
+QLabel#pageTitle {{ color: {INK}; font-size: 24px; font-weight: 600; }}
+QLabel#bigNumber {{ color: {INK}; font-size: 24px; font-weight: 600; }}
+QListView#gallery {{ background: transparent; border: none; outline: none; }}
+QWidget#panel {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: {RADIUS_CARD}px; }}
+QScrollArea {{ background: transparent; border: none; }}
+QScrollArea > QWidget > QWidget {{ background: transparent; }}
 """
+
+
+class IconBadge(QWidget):
+    """Crisp Fluent icon glyph rendered at a fixed optical size and color."""
+
+    def __init__(self, icon, color=INK_SECONDARY, size=15, parent=None):
+        super().__init__(parent)
+        self._icon = icon
+        self._color = color
+        self._size = size
+        self.setFixedSize(size + 2, size + 2)
+
+    def set_icon(self, icon, color=None):
+        self._icon = icon
+        if color is not None:
+            self._color = color
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        offset = (self.width() - self._size) / 2
+        self._icon.render(painter, QRectF(offset, offset, self._size, self._size), fill=self._color)
 
 
 class ComboBox(FluentComboBox):
@@ -59,7 +94,7 @@ class ComboBox(FluentComboBox):
     def __init__(self, parent=None):
         self._full_text = ""
         super().__init__(parent)
-        self.setMinimumHeight(40)
+        self.setMinimumHeight(36)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.setMaxVisibleItems(12)
 
@@ -72,7 +107,7 @@ class ComboBox(FluentComboBox):
         QPushButton.setText(
             self,
             self.fontMetrics().elidedText(
-                self._full_text, Qt.TextElideMode.ElideRight, max(20, self.width() - 40)
+                self._full_text, Qt.TextElideMode.ElideRight, max(20, self.width() - 38)
             ),
         )
 
@@ -81,10 +116,10 @@ class ComboBox(FluentComboBox):
         self._elide()
 
     def sizeHint(self):
-        return QSize(180, 40)
+        return QSize(168, 36)
 
     def minimumSizeHint(self):
-        return QSize(80, 40)
+        return QSize(80, 36)
 
 
 class _SpinEditorGeometry:
@@ -118,47 +153,136 @@ class DoubleSpinBox(_SpinEditorGeometry, FluentDoubleSpinBox):
     pass
 
 
-class FoldSection(QWidget):
-    """Keep infrequent controls available without crowding the acquisition view."""
+def divider(parent=None):
+    line = QFrame(parent)
+    line.setFixedHeight(1)
+    line.setStyleSheet(f"background: {BORDER_SUBTLE}; border: none;")
+    return line
 
-    def __init__(self, title, parent=None):
+
+def icon_button(icon, tooltip, callback=None, *, soft=False, danger=False):
+    button = ToolButton(icon)
+    button.setToolTip(tooltip)
+    button.setAccessibleName(tooltip)
+    button.setFixedSize(36, 36)
+    button.setProperty("vannusIconButton", True)
+    if soft:
+        button.setProperty("softAction", True)
+    if danger:
+        button.setProperty("dangerAction", True)
+    if callback is not None:
+        button.clicked.connect(callback)
+    return button
+
+
+class FoldSection(QWidget):
+    """Collapsible panel section with crisp Fluent icon, title, summary, and disclosure chevron."""
+
+    def __init__(self, title, parent=None, *, icon=None):
         super().__init__(parent)
         self.title = title
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(6)
-        self.toggle = TransparentPushButton("＋  " + title)
+        layout.addWidget(divider(self))
+
+        self.toggle = QPushButton("", self)
         self.toggle.setCheckable(True)
+        self.toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggle.setAccessibleName(title)
         self.toggle.setProperty("foldControl", True)
+        self.toggle.setFixedHeight(34)
+        self.toggle.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        header = QHBoxLayout(self.toggle)
+        header.setContentsMargins(6, 0, 6, 0)
+        header.setSpacing(8)
+        if icon is not None:
+            badge = IconBadge(icon, INK_SECONDARY, size=14, parent=self.toggle)
+            badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            header.addWidget(badge)
+        title_label = BodyLabel(title, self.toggle)
+        title_label.setObjectName("sectionTitle")
+        title_label.setTextColor(QColor(INK), QColor(INK))
+        title_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        header.addWidget(title_label)
+        header.addStretch(1)
+        self.summary_label = CaptionLabel("", self.toggle)
+        self.summary_label.setTextColor(QColor(MUTED), QColor(MUTED))
+        self.summary_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.summary_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.summary_label.hide()
+        header.addWidget(self.summary_label)
+        self._chevron = IconBadge(FIF.CHEVRON_RIGHT_MED, MUTED, size=11, parent=self.toggle)
+        self._chevron.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        header.addWidget(self._chevron)
         layout.addWidget(self.toggle)
+
         self.content = QWidget()
         self.content_layout = QVBoxLayout(self.content)
-        self.content_layout.setContentsMargins(0, 6, 0, 12)
-        self.content_layout.setSpacing(12)
+        self.content_layout.setContentsMargins(2, 4, 2, 10)
+        self.content_layout.setSpacing(10)
         layout.addWidget(self.content)
         self.content.hide()
         self.toggle.toggled.connect(self._toggle)
 
     def _toggle(self, expanded):
-        self.toggle.setText(("－  " if expanded else "＋  ") + self.title)
+        self._chevron.set_icon(FIF.CHEVRON_DOWN_MED if expanded else FIF.CHEVRON_RIGHT_MED)
         self.content.setVisible(expanded)
 
     def set_expanded(self, expanded):
         self.toggle.setChecked(expanded)
 
+    def set_summary(self, text):
+        self.summary_label.setText(text)
+        self.summary_label.setVisible(bool(text))
 
-def menu_button(title, actions, *, compact=False):
-    button = DropDownToolButton(FIF.MORE) if compact else DropDownPushButton(title)
-    button.setToolTip(title)
+
+def menu_button(title, actions, *, compact=False, icon=None):
+    """Create a menu trigger button without overlapping icons on compact tool buttons."""
     if compact:
-        button.setFixedSize(40, 40)
+        button = ToolButton(icon or FIF.MORE)
+        button.setFixedSize(36, 36)
+        button.setProperty("vannusIconButton", True)
+    else:
+        button = DropDownPushButton(icon, title) if icon is not None else DropDownPushButton(title)
+    button.setToolTip(title)
+    button.setAccessibleName(title)
     menu = RoundMenu(parent=button)
-    for label, callback in actions:
-        action = Action(label, menu)
+    for entry in actions:
+        if len(entry) == 3:
+            act_icon, label, callback = entry
+            action = Action(act_icon, label, menu)
+        else:
+            label, callback = entry
+            action = Action(label, menu)
         action.triggered.connect(callback)
         menu.addAction(action)
-    button.setMenu(menu)
+    if compact:
+        button._menu = menu
+        button.clicked.connect(lambda: menu.exec(button.mapToGlobal(QPoint(0, button.height() + 4))))
+    else:
+        button.setMenu(menu)
     return button
+
+
+def keycap_row(keys, description, parent=None):
+    row = QWidget(parent)
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 2, 0, 2)
+    layout.setSpacing(8)
+    for key in keys if isinstance(keys, (list, tuple)) else [keys]:
+        chip = QLabel(key, row)
+        chip.setProperty("compactControl", True)
+        chip.setStyleSheet(
+            f"QLabel {{ background: {SURFACE_SUBTLE}; color: {INK}; border: 1px solid {BORDER}; "
+            "border-radius: 6px; padding: 3px 8px; font-size: 12px; font-weight: 500; }"
+        )
+        layout.addWidget(chip)
+    label = BodyLabel(description, row)
+    label.setTextColor(QColor(INK_SECONDARY), QColor(INK_SECONDARY))
+    layout.addWidget(label, 1)
+    return row
 
 
 class MetadataEditor(QWidget):
@@ -175,12 +299,13 @@ class MetadataEditor(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().hide()
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setFixedHeight(120)
+        self.table.setFixedHeight(112)
         layout.addWidget(self.table)
         row = QHBoxLayout()
-        add = PushButton("添加字段")
+        row.setSpacing(8)
+        add = PushButton(FIF.ADD, "添加字段")
         add.clicked.connect(self.add_row)
-        remove = PushButton("移除选中行")
+        remove = PushButton(FIF.DELETE, "移除选中行")
         remove.clicked.connect(self.remove_row)
         row.addWidget(add)
         row.addWidget(remove)
@@ -225,7 +350,7 @@ class MetadataEditor(QWidget):
 def muted(text, parent=None):
     label = CaptionLabel(text, parent)
     label.setObjectName("muted")
-    label.setTextColor(QColor("#858BA0"), QColor("#858BA0"))
+    label.setTextColor(QColor(MUTED), QColor(MUTED))
     label.setWordWrap(True)
     return label
 
@@ -241,23 +366,30 @@ def heading(title, subtitle="", eyebrow=None):
     widget = QWidget()
     layout = QVBoxLayout(widget)
     layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(6)
+    layout.setSpacing(4)
     label = BodyLabel(title)
     label.setObjectName("pageTitle")
-    label.setTextColor(QColor("#252B43"), QColor("#252B43"))
+    label.setTextColor(QColor(INK), QColor(INK))
     layout.addWidget(label)
     if subtitle:
         layout.addWidget(muted(subtitle))
     return widget
 
 
-def panel(title, subtitle=None):
+def panel(title, subtitle=None, *, icon=None):
     card = CardWidget()
     layout = QVBoxLayout(card)
     layout.setContentsMargins(18, 16, 18, 18)
-    layout.setSpacing(12)
+    layout.setSpacing(10)
     if title:
-        layout.addWidget(SubtitleLabel(title))
+        if icon is not None:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            row.addWidget(IconBadge(icon, INK_SECONDARY, size=16, parent=card))
+            row.addWidget(SubtitleLabel(title), 1)
+            layout.addLayout(row)
+        else:
+            layout.addWidget(SubtitleLabel(title))
     if subtitle:
         layout.addWidget(muted(subtitle))
     return card, layout
@@ -276,9 +408,9 @@ class FormDialog(MessageBoxBase):
         self.viewLayout.addWidget(SubtitleLabel(title, self))
         self.fields = {}
         self.error_label = muted("")
-        self.error_label.setStyleSheet("color: #BD3535")
+        self.error_label.setStyleSheet(f"color: {DANGER};")
         form = QFormLayout()
-        form.setSpacing(12)
+        form.setSpacing(10)
         for key, label, multiline in fields:
             if key == "custom":
                 edit = MetadataEditor(self)
@@ -290,7 +422,7 @@ class FormDialog(MessageBoxBase):
                 pass
             elif multiline:
                 edit.setPlainText(text)
-                edit.setFixedHeight(80)
+                edit.setFixedHeight(78)
             else:
                 edit.setText(text)
                 edit.setClearButtonEnabled(True)
@@ -300,7 +432,7 @@ class FormDialog(MessageBoxBase):
         self.viewLayout.addWidget(self.error_label)
         self.yesButton.setText("保存")
         self.cancelButton.setText("取消")
-        self.widget.setMinimumWidth(470)
+        self.widget.setMinimumWidth(460)
 
     def values(self):
         return {
@@ -326,6 +458,7 @@ class FormDialog(MessageBoxBase):
 
 def button_row(*buttons):
     layout = QHBoxLayout()
+    layout.setSpacing(8)
     for button in buttons:
         layout.addWidget(button)
     layout.addStretch()
@@ -349,7 +482,7 @@ def list_view(parent, model, delegate, *, compact=False):
     if compact:
         view.setFlow(QListView.Flow.LeftToRight)
         view.setWrapping(False)
-        view.setFixedHeight(140)
+        view.setFixedHeight(128)
         view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     return view

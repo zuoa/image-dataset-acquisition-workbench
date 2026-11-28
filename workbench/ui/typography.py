@@ -1,4 +1,4 @@
-"""Readable, restrained typography for Fluent controls, including dynamic dialogs."""
+"""Editorial typography and Morandi control styling for Fluent widgets."""
 
 import sys
 
@@ -10,33 +10,57 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QToolButton,
     QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     PrimaryPushButton,
+    SearchLineEdit,
     SubtitleLabel,
     setCustomStyleSheet,
     setFontFamilies,
 )
 
-from .theme import BLUE, INK
+from .theme import (
+    BLUE,
+    BLUE_HOVER,
+    BLUE_PRESSED,
+    BORDER,
+    BORDER_STRONG,
+    DANGER,
+    DANGER_BG,
+    DANGER_BORDER,
+    DANGER_HOVER,
+    INK,
+    INK_SECONDARY,
+    RADIUS_CONTROL,
+    SOFT_BORDER,
+    SOFT_HOVER,
+    SURFACE,
+    SURFACE_HOVER,
+    SURFACE_SUBTLE,
+    SURFACE_TINT,
+)
 
 
 def font_families():
     if sys.platform == "darwin":
-        return ["Helvetica Neue", "PingFang SC"]
+        return ["Avenir Next", "PingFang SC"]
     if sys.platform == "win32":
-        return ["Microsoft YaHei UI", "Segoe UI"]
-    return ["Noto Sans CJK SC", "DejaVu Sans"]
+        return ["Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI"]
+    return ["Inter", "Noto Sans CJK SC", "DejaVu Sans"]
 
 
-def interface_font(size=17, weight=QFont.Weight.Normal):
+def interface_font(size=14, weight=QFont.Weight.Normal, *, tracking=0.0):
     font = QFont()
     font.setFamilies(font_families())
     font.setPixelSize(size)
     font.setWeight(weight)
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    if tracking:
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, tracking)
     return font
 
 
@@ -47,52 +71,100 @@ class Typography(QObject):
         if widget.property("vannusTypography"):
             return False
         widget.setProperty("vannusTypography", True)
-        size, weight = 17, QFont.Weight.Normal
+        if widget.property("compactControl"):
+            return False
+
+        size, weight, tracking = 14, QFont.Weight.Normal, 0.0
         if isinstance(widget, CaptionLabel):
-            size = 14
+            size = 12
         elif isinstance(widget, SubtitleLabel):
-            size, weight = 20, QFont.Weight.Medium
+            size, weight, tracking = 15, QFont.Weight.Medium, 0.15
         if isinstance(widget, QLabel) and widget.objectName() == "pageTitle":
-            size, weight = 28, QFont.Weight.Medium
+            size, weight, tracking = 24, QFont.Weight.DemiBold, 0.35
         elif isinstance(widget, QLabel) and widget.objectName() == "sectionTitle":
-            size, weight = 17, QFont.Weight.Medium
+            size, weight, tracking = 13, QFont.Weight.Medium, 0.25
         elif isinstance(widget, QLabel) and widget.objectName() == "metricValue":
-            size, weight = 30, QFont.Weight.Medium
+            size, weight, tracking = 28, QFont.Weight.DemiBold, -0.3
+
         if isinstance(widget, (BodyLabel, SubtitleLabel)) and widget.lightColor.name() == "#000000":
-            widget.setTextColor(INK, INK)
+            color = INK_SECONDARY if widget.objectName() == "sectionTitle" else INK
+            widget.setTextColor(color, color)
+
         if isinstance(widget, QPushButton):
-            size = 16
-            # Fluent's button stylesheet specifies 14px, so changing QApplication's
-            # font alone has no effect. Append through its supported theme API.
+            size, weight = 13, QFont.Weight.Medium
             fold = widget.property("foldControl")
-            alignment = "text-align: left; border: none; background: transparent;" if fold else ""
-            css = (
-                "QPushButton { font: 16px '"
-                + font_families()[0]
-                + "'; font-weight: 400; border-radius: 11px; "
-                "background: #FFFFFF; border: 1px solid #E9ECF4; color: #505971; " + alignment + "}"
-                "QPushButton:hover {background: #F4F7FF; border-color: #DFE7FD;}"
-            )
-            if isinstance(widget, PrimaryPushButton):
-                css += (
-                    f"QPushButton {{background: {BLUE}; border: 1px solid {BLUE}; color: white;}}"
-                    "QPushButton:hover {background: #2E6CE8; border-color: #2E6CE8;}"
-                    "QPushButton:disabled {background: #E7EBF5; border-color: #E7EBF5; color: #A8AFC1;}"
+            if fold:
+                css = (
+                    "QPushButton { font-size: 13px; font-weight: 500; text-align: left; "
+                    f"border: none; border-radius: 8px; background: transparent; color: {INK}; "
+                    "padding: 4px 6px; }"
+                    f"QPushButton:hover {{ background: {SURFACE_HOVER}; }}"
                 )
-            elif widget.property("softAction"):
-                css += "QPushButton {background: #EDF3FF; color: #3978F6; border-color: #EDF3FF;}"
-            setCustomStyleSheet(widget, css, css)
-            widget.setMinimumHeight(max(40, widget.minimumHeight()))
-        elif isinstance(widget, QAbstractSpinBox):
-            widget.setFixedHeight(40)
-        elif isinstance(widget, QLineEdit) and not isinstance(widget.parentWidget(), QAbstractSpinBox):
-            widget.setFixedHeight(40)
+                setCustomStyleSheet(widget, css, css)
+                widget.setMinimumHeight(max(32, widget.minimumHeight()))
+            else:
+                css = (
+                    f"QPushButton {{ font-size: 13px; font-weight: 500; border-radius: {RADIUS_CONTROL}px; "
+                    f"background: {SURFACE}; border: 1px solid {BORDER}; color: {INK_SECONDARY}; "
+                    "padding: 0 14px; }"
+                    f"QPushButton:hover {{ background: {SURFACE_HOVER}; border-color: {BORDER_STRONG}; color: {INK}; }}"
+                    f"QPushButton:pressed {{ background: {SURFACE_TINT}; }}"
+                    f"QPushButton:disabled {{ background: {SURFACE_SUBTLE}; border-color: #E7E2DA; color: #B4AFA7; }}"
+                )
+                if isinstance(widget, PrimaryPushButton):
+                    css += (
+                        f"QPushButton {{ background: {BLUE}; border: 1px solid {BLUE}; color: #FDFCFA; }}"
+                        f"QPushButton:hover {{ background: {BLUE_HOVER}; border-color: {BLUE_HOVER}; color: #FDFCFA; }}"
+                        f"QPushButton:pressed {{ background: {BLUE_PRESSED}; border-color: {BLUE_PRESSED}; color: #FDFCFA; }}"
+                        "QPushButton:disabled { background: #DDD8CF; border-color: #DDD8CF; color: #A6A198; }"
+                    )
+                elif widget.property("dangerAction"):
+                    css += (
+                        f"QPushButton {{ background: {DANGER_BG}; border: 1px solid {DANGER_BORDER}; color: {DANGER}; }}"
+                        f"QPushButton:hover {{ background: {DANGER_HOVER}; border-color: #D2ABA5; color: {DANGER}; }}"
+                        f"QPushButton:disabled {{ background: {SURFACE_SUBTLE}; border-color: #E7E2DA; color: #B6B1A9; }}"
+                    )
+                elif widget.property("softAction"):
+                    css += (
+                        f"QPushButton {{ background: {SURFACE_TINT}; color: {BLUE}; border: 1px solid {SOFT_BORDER}; }}"
+                        f"QPushButton:hover {{ background: {SOFT_HOVER}; border-color: #B9CBD8; color: {BLUE_HOVER}; }}"
+                        f"QPushButton:disabled {{ background: {SURFACE_SUBTLE}; border-color: #E7E2DA; color: #B4AFA7; }}"
+                    )
+                setCustomStyleSheet(widget, css, css)
+                widget.setMinimumHeight(max(36, widget.minimumHeight()))
+        elif isinstance(widget, QToolButton) and widget.property("vannusIconButton"):
             css = (
-                "QLineEdit {background: #FFFFFF; border: 1px solid #EBEDF5; border-radius: 11px;}"
-                "QLineEdit:focus {border: 1px solid #A9C3FF;}"
+                f"QToolButton {{ border-radius: {RADIUS_CONTROL}px; background: {SURFACE}; "
+                f"border: 1px solid {BORDER}; }}"
+                f"QToolButton:hover {{ background: {SURFACE_HOVER}; border-color: {BORDER_STRONG}; }}"
+                f"QToolButton:pressed {{ background: {SURFACE_TINT}; }}"
+                f"QToolButton:disabled {{ background: {SURFACE_SUBTLE}; border-color: #E7E2DA; }}"
+            )
+            if widget.property("softAction"):
+                css += (
+                    f"QToolButton {{ background: {SURFACE_TINT}; border: 1px solid {SOFT_BORDER}; }}"
+                    f"QToolButton:hover {{ background: {SOFT_HOVER}; border-color: #B9CBD8; }}"
+                )
+            elif widget.property("dangerAction"):
+                css += (
+                    f"QToolButton {{ background: {DANGER_BG}; border: 1px solid {DANGER_BORDER}; }}"
+                    f"QToolButton:hover {{ background: {DANGER_HOVER}; border-color: #D2ABA5; }}"
+                    f"QToolButton:disabled {{ background: {SURFACE_SUBTLE}; border-color: #E7E2DA; }}"
+                )
+            setCustomStyleSheet(widget, css, css)
+        elif isinstance(widget, QAbstractSpinBox):
+            widget.setFixedHeight(36)
+        elif isinstance(widget, QLineEdit) and not isinstance(widget.parentWidget(), QAbstractSpinBox):
+            widget.setFixedHeight(36)
+            right_pad = 36 if isinstance(widget, SearchLineEdit) else 10
+            css = (
+                f"QLineEdit {{ background: {SURFACE}; border: 1px solid {BORDER}; "
+                f"border-radius: {RADIUS_CONTROL}px; color: {INK}; padding: 0 {right_pad}px 0 11px; }}"
+                f"QLineEdit:hover {{ border-color: {BORDER_STRONG}; }}"
+                f"QLineEdit:focus {{ border: 1px solid {BLUE}; }}"
             )
             setCustomStyleSheet(widget, css, css)
-        widget.setFont(interface_font(size, weight))
+        widget.setFont(interface_font(size, weight, tracking=tracking))
         return False
 
 

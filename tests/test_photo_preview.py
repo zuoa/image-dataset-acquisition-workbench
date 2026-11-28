@@ -123,3 +123,32 @@ def test_photo_without_regions_defaults_to_original(qt_app, preview_archive):
         dialog.close()
         host.close()
         qt_app.processEvents()
+
+
+def test_photo_dialog_prev_next_navigation(qt_app, preview_archive):
+    from PySide6.QtTest import QTest
+
+    workspace, dataset, (first_id, second_id) = preview_archive
+    photos = [workspace.photo(first_id), workspace.photo(second_id)]
+    host = QWidget()
+    host.workspace = workspace
+    dialog = PhotoDialog(host, photos[0], photos=photos, index=0)
+    try:
+        dialog.show()
+        qt_app.processEvents()
+        assert dialog.prev_button.isVisible()
+        assert not dialog.prev_button.isEnabled()
+        assert dialog.next_button.isEnabled()
+        assert dialog.index_pill.text() == "1 / 2"
+        dialog.next_button.click()
+        assert dialog.photo["id"] == second_id
+        assert dialog.index_pill.text() == "2 / 2"
+        assert not dialog.next_button.isEnabled()
+        QTest.keyClick(dialog, Qt.Key.Key_Left)
+        assert dialog.photo["id"] == first_id
+        assert dialog.index_pill.text() == "1 / 2"
+    finally:
+        dialog.close()
+        host.close()
+        qt_app.processEvents()
+

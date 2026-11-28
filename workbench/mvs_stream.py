@@ -28,6 +28,7 @@ class MvsStream(QObject):
         self.timer.timeout.connect(self._read)
         self.devices = []
         self.discovery_error = ""
+        self.sdk_ready = None
         self.device = None
         self.settings = CameraSettings()
         self.settings_pending = False
@@ -70,6 +71,7 @@ class MvsStream(QObject):
         self._discovering = False
         self.devices = devices or []
         self.discovery_error = error
+        self.sdk_ready = not bool(error)
         self.devices_changed.emit()
 
     def open(self, device):

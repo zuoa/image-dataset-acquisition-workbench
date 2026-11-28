@@ -172,6 +172,8 @@ def test_photo_save_keeps_canvas_enabled_and_restores_preview_priority(qt_app, t
         assert not window.capture.options_scroll.isEnabled()
         assert not window.capture.mode_combo.isEnabled()
         assert not window.capture.shoot.isEnabled()
+        assert window.capture.shoot.text() == "保存中…"
+        assert not window.task_bar.isVisible()
         assert not window.navigationInterface.isEnabled()
         release.set()
         pump(qt_app, lambda: not window.runner.busy)
@@ -458,3 +460,122 @@ def test_unified_library_filters_actions_and_capture_context(qt_app, tmp_path, m
     finally:
         window.close()
         qt_app.processEvents()
+
+
+def test_increment_sample_id_and_trash_multi_select_restore(qt_app, tmp_path):
+    from workbench.storage import Workspace
+    from workbench.ui.capture import increment_sample_id
+
+    assert increment_sample_id("EGG-001") == "EGG-002"
+    assert increment_sample_id("EGG-099") == "EGG-100"
+    assert increment_sample_id("A1") == "A2"
+    assert increment_sample_id("007") == "008"
+    assert increment_sample_id("NO-DIGITS") == "NO-DIGITS"
+    assert increment_sample_id("") == ""
+
+    workspace = Workspace(tmp_path / "ux-check")
+    dataset = workspace.save_dataset("样本递增与回收站")
+    batch = workspace.save_batch(dataset, "第一批")
+    p1 = workspace.add_photo(Image.new("RGB", (40, 30), "teal"), dataset, batch, sample_id="EGG-001")
+    p2 = workspace.add_photo(Image.new("RGB", (40, 30), "blue"), dataset, batch, sample_id="EGG-002")
+    lock = QLockFile(str(workspace.root / ".fieldwork.lock"))
+    assert lock.tryLock(100)
+    preferences = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(workspace, preferences, tmp_path, lock)
+    try:
+        window.open_capture(dataset)
+        window.capture.sample.setText("EGG-009")
+        window.capture.auto_increment.setChecked(True)
+        window.capture._saved(None)
+        assert window.capture.sample.text() == "EGG-010"
+        window.capture.auto_increment.setChecked(False)
+        window.capture._saved(None)
+        assert window.capture.sample.text() == "EGG-010"
+
+        workspace.trash("photo", [p1, p2])
+        window.refresh()
+        assert window.trash.list.count() == 2
+        assert window.trash.clear_button.isEnabled()
+        window.trash.list.selectAll()
+        qt_app.processEvents()
+        assert "2" in window.trash.restore_button.text()
+        window.trash.restore()
+        assert window.trash.list.count() == 0
+        assert not window.trash.clear_button.isEnabled()
+        assert not window.trash.restore_button.isEnabled()
+        assert workspace.count_photos(dataset_id=dataset) == 2
+    finally:
+        window.close()
+        qt_app.processEvents()
+
+
+def test_mvs_sdk_settings_and_capture_warning_actions(qt_app, tmp_path, monkeypatch):
+    from workbench import mvs
+    from workbench.storage import Workspace
+    from workbench.ui import settings as settings_ui
+
+    monkeypatch.delenv("VANNUS_MVS_LIBRARY", raising=False)
+    monkeypatch.setattr(mvs, "_custom_library_path", "")
+    workspace = Workspace(tmp_path / "mvs-settings")
+    dataset = workspace.save_dataset("海康设置验收")
+    workspace.save_batch(dataset, "第一批")
+    lock = QLockFile(str(workspace.root / ".fieldwork.lock"))
+    assert lock.tryLock(100)
+    preferences = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
+    missing_sdk = tmp_path / "missing-mvs-sdk"
+    preferences.setValue("mvs/library_path", str(missing_sdk))
+    window = MainWindow(workspace, preferences, tmp_path, lock)
+    try:
+        window.show()
+        window.open_capture(dataset)
+        pump(qt_app, lambda: window.capture.camera.mvs.sdk_ready is False)
+        assert window.capture.mvs_warning.isVisible()
+        assert "MVS SDK" in window.capture.mvs_warning_label.text()
+
+        opened_urls = []
+        monkeypatch.setattr(window, "open_url", opened_urls.append)
+        window.capture.mvs_download_button.click()
+        assert opened_urls == [mvs.DOWNLOAD_URL]
+
+        window.capture.mvs_settings_button.click()
+        pump(qt_app, lambda: window.stackedWidget.currentWidget() is window.settings)
+        assert window.settings.mvs_status.text() == "未加载"
+        assert str(missing_sdk.resolve()) in window.settings.mvs_path_label.text()
+        assert window.settings.mvs_reset_button.isEnabled()
+
+        window.settings.mvs_download_button.click()
+        assert opened_urls == [mvs.DOWNLOAD_URL, mvs.DOWNLOAD_URL]
+
+        custom_sdk = tmp_path / "custom-mvs-sdk"
+        custom_sdk.write_bytes(b"placeholder")
+        monkeypatch.setattr(
+            settings_ui.QFileDialog,
+            "getOpenFileName",
+            lambda *args, **kwargs: (str(custom_sdk), ""),
+        )
+        window.settings.choose_mvs_library()
+        pump(qt_app, lambda: not window.capture.camera.mvs._discovering)
+        assert mvs.get_custom_library_path() == str(custom_sdk.resolve())
+        assert str(custom_sdk.resolve()) in window.settings.mvs_path_label.text()
+
+        window.open_capture(dataset)
+        assert window.capture.mvs_warning.isVisible()
+        window.capture.mvs_dismiss_button.click()
+        assert window.capture.mvs_warning.isHidden()
+        preferences.sync()
+        persisted = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
+        assert persisted.value("capture/mvs_warning_dismissed", False, type=bool) is True
+
+        # Reset custom path and verify UI reflects default path and ready state when SDK loads.
+        monkeypatch.setattr(window.capture.camera.mvs.backend, "devices", lambda: [])
+        window.settings.reset_mvs_library()
+        pump(qt_app, lambda: window.capture.camera.mvs.sdk_ready is True)
+        assert mvs.get_custom_library_path() == ""
+        assert not window.settings.mvs_reset_button.isEnabled()
+        assert window.settings.mvs_status.text() == "已就绪"
+        assert window.capture.mvs_warning.isHidden()
+    finally:
+        mvs.set_custom_library_path("")
+        window.close()
+        qt_app.processEvents()
+
