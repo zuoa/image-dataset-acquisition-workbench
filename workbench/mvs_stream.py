@@ -6,15 +6,15 @@ import time
 from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal, Slot
 
 from .jobs import Job
-from .mvs import Exposure, MvsCamera, MvsError
+from .mvs import CameraSettings, MvsCamera, MvsError
 
 
 class MvsStream(QObject):
     frame = Signal(object, float)
     connected = Signal(bool)
     failed = Signal(str)
-    exposure_changed = Signal()
-    exposure_error = Signal(str)
+    settings_changed = Signal()
+    settings_error = Signal(str)
     devices_changed = Signal()
 
     def __init__(self, parent=None):
@@ -29,13 +29,16 @@ class MvsStream(QObject):
         self.devices = []
         self.discovery_error = ""
         self.device = None
-        self.exposure = Exposure()
+        self.settings = CameraSettings()
+        self.settings_pending = False
+        self.settings_frame_at = 0.0
+        self.exposure_wait = 0.0
         self.active = False
         self._generation = 0
         self._received_at = 0.0
         self._discovering = False
         self._reading = False
-        self._exposure_change = None
+        self._settings_change = None
 
     def _submit(self, work, done=None):
         def run(cancel, progress):
@@ -90,8 +93,8 @@ class MvsStream(QObject):
             return
         self._reading = True
         generation = self._generation
-        change = self._exposure_change
-        self._exposure_change = None
+        change = self._settings_change
+        self._settings_change = None
 
         def ready(result, error):
             self._reading = False
@@ -100,26 +103,41 @@ class MvsStream(QObject):
             if error:
                 self._fail(error)
                 return
-            packet, self.exposure, exposure_error = result
+            if self._settings_change is not None:
+                return
+            packet, self.settings, settings_error = result
+            exposure_seconds = (self.settings.exposure.value or 0) / 1_000_000
+            if change is not None:
+                self._received_at = time.monotonic()
+                self.exposure_wait = exposure_seconds
             if packet is not None:
+                self.exposure_wait = exposure_seconds
                 image, self._received_at = packet
+                adjusted = self.settings_pending
+                if adjusted:
+                    self.settings_pending = False
+                    self.settings_frame_at = self._received_at
                 self.frame.emit(image, self._received_at)
                 if not self.active:
                     self.active = True
                     self.connected.emit(True)
-            elif time.monotonic() - self._received_at > 4:
-                self._fail("未收到海康相机画面，请检查 USB 连接并重连")
-                return
-            if change is not None and self._exposure_change is None:
-                self.exposure_changed.emit()
-            if exposure_error:
-                self.exposure_error.emit(exposure_error)
+                if adjusted:
+                    self.settings_changed.emit()
+            else:
+                self.exposure_wait = max(self.exposure_wait, exposure_seconds)
+                if time.monotonic() - self._received_at > 4 + self.exposure_wait:
+                    self._fail("未收到海康相机画面，请检查 USB 连接并重连")
+                    return
+            if settings_error:
+                self.settings_error.emit(settings_error)
 
         self._submit(lambda: self.backend.read(change), ready)
 
-    def set_exposure(self, auto, milliseconds):
-        if self.active:
-            self._exposure_change = auto, milliseconds * 1000
+    def adjust(self, change):
+        if self.active and not self.settings_pending:
+            self._settings_change = change
+            self.settings_pending = True
+            self.settings_changed.emit()
 
     def _fail(self, message):
         self.stop()
@@ -132,6 +150,9 @@ class MvsStream(QObject):
         self._generation += 1
         self.device = None
         self.active = False
-        self.exposure = Exposure()
-        self._exposure_change = None
+        self.settings = CameraSettings()
+        self.settings_pending = False
+        self.settings_frame_at = 0.0
+        self.exposure_wait = 0.0
+        self._settings_change = None
         self._submit(self.backend.close)

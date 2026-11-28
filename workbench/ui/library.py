@@ -47,6 +47,21 @@ from .models import ROLE, MediaModel, PhotoDelegate, media_title
 from .theme import BACKGROUND
 
 
+def camera_settings_lines(camera):
+    if not isinstance(camera, dict):
+        return []
+    lines = []
+    if camera.get("capture_profile") == "candling":
+        lines.append("照蛋模式")
+    exposure = camera.get("exposure_time")
+    if isinstance(exposure, (int, float)) and exposure > 0:
+        lines.append(f"曝光 {exposure * 1000:.3f} ms")
+    gain = camera.get("gain_db")
+    if isinstance(gain, (int, float)):
+        lines.append(f"增益 {gain:.2f} dB")
+    return lines
+
+
 class PhotoDialog(QDialog):
     def __init__(self, app, photo):
         super().__init__(app)
@@ -113,9 +128,7 @@ class PhotoDialog(QDialog):
         metadata = json.loads(photo["metadata"])
         field("自定义信息", "\n".join(f"{k}：{v}" for k, v in metadata.get("custom", {}).items()))
         camera = metadata.get("camera", {})
-        lines = [camera.get("device", "外部导入图像")]
-        if camera.get("exposure_time"):
-            lines.append(f"曝光 {camera['exposure_time'] * 1000:.2f} ms")
+        lines = [camera.get("device", "外部导入图像"), *camera_settings_lines(camera)]
         for processing in history:
             template = processing.get("template") or {}
             lines.append(f"\n处理 v{processing['version']} · {template.get('name', '手动热区')}")
@@ -484,11 +497,13 @@ class LibraryPage(QWidget):
                 if item["media_type"] == "video"
                 else f"图片 · {item['width']} × {item['height']}"
             )
-            custom = json.loads(item["metadata"]).get("custom", {})
+            metadata = json.loads(item["metadata"])
+            details = camera_settings_lines(metadata.get("camera"))
+            details.extend(f"{key}：{value}" for key, value in metadata.get("custom", {}).items())
             self.selection_details.setText(
                 f"{dimensions}\n{item['batch_name']}\n{format_datetime(item['created_at'])}"
                 f"\n\n{item['tags']}\n{item['note']}\n"
-                + "\n".join(f"{key}：{value}" for key, value in custom.items())
+                + "\n".join(details)
             )
 
     def require_selection(self):

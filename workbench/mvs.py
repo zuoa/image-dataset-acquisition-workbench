@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import ctypes as C
+import logging
 import os
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtGui import QImage
@@ -39,13 +40,33 @@ class MvsDevice:
 
 
 @dataclass(frozen=True)
-class Exposure:
-    microseconds: float | None = None
-    auto: bool = False
-    manual: bool = False
-    supports_auto: bool = False
-    min_us: float = 0.0
-    max_us: float = 0.0
+class FloatControl:
+    value: float | None = None
+    writable: bool = False
+    minimum: float = 0.0
+    maximum: float = 0.0
+
+    def clamp(self, value):
+        return min(self.maximum, max(self.minimum, value))
+
+
+@dataclass(frozen=True)
+class CameraSettings:
+    exposure: FloatControl = FloatControl()
+    gain: FloatControl = FloatControl()
+    gamma_enabled: bool | None = None
+    candling: bool = False
+
+    @property
+    def supports_candling(self):
+        return self.exposure.writable and self.gain.writable
+
+
+@dataclass(frozen=True)
+class SettingsChange:
+    exposure_us: float | None = None
+    gain_db: float | None = None
+    candling: bool | None = None
 
 
 # Layouts from the MVS 4.x CameraParams.h. We read only the USB member of
@@ -138,15 +159,6 @@ class FloatValue(C.Structure):
     ]
 
 
-class EnumValue(C.Structure):
-    _fields_ = [
-        ("current", C.c_uint32),
-        ("count", C.c_uint32),
-        ("values", C.c_uint32 * 64),
-        ("reserved", C.c_uint32 * 4),
-    ]
-
-
 def _library_path():
     override = os.environ.get("VANNUS_MVS_LIBRARY")
     if override:
@@ -203,8 +215,8 @@ class MvsSdk:
             "SetIntValueEx": (handle, key, C.c_int64),
             "GetFloatValue": (handle, key, ptr(FloatValue)),
             "SetFloatValue": (handle, key, C.c_float),
+            "GetBoolValue": (handle, key, ptr(C.c_bool)),
             "SetBoolValue": (handle, key, C.c_bool),
-            "GetEnumValue": (handle, key, ptr(EnumValue)),
         }
         for name, args in signatures.items():
             function = getattr(self.lib, "MV_CC_" + name)
@@ -259,8 +271,9 @@ class MvsCamera:
         self.handle = C.c_void_p()
         self.opened = False
         self.grabbing = False
-        self.exposure = Exposure()
-        self.exposure_read_at = 0.0
+        self.settings = CameraSettings()
+        self._manual_gain = False
+        self._normal_settings = None
 
     def _initialize(self):
         sdk = MvsSdk()
@@ -303,12 +316,20 @@ class MvsCamera:
             for node, value in ((b"OffsetX", 0), (b"OffsetY", 0), (b"Width", WIDTH), (b"Height", HEIGHT)):
                 _check(sdk.SetIntValueEx(handle, node, value), f"无法设置海康相机 {node.decode()}")
             self._limit_frame_rate()
-            self.exposure = self._initial_exposure()
-            _check(sdk.StartGrabbing(handle), "海康相机启动取流失败")
-            self.grabbing = True
+            _check(
+                sdk.SetEnumValueByString(handle, b"ExposureAuto", b"Off"),
+                "无法关闭海康相机自动曝光",
+            )
+            self._manual_gain = not sdk.SetEnumValueByString(handle, b"GainAuto", b"Off")
+            self.settings = self._read_settings()
+            self._start_grabbing()
         except Exception:
             self.close()
             raise
+
+    def _start_grabbing(self):
+        _check(self.sdk.StartGrabbing(self.handle), "海康相机启动取流失败")
+        self.grabbing = True
 
     def _limit_frame_rate(self):
         sdk, handle = self.sdk, self.handle
@@ -323,63 +344,103 @@ class MvsCamera:
         access = C.c_int()
         return not self.sdk.node_access(self.handle, node, C.byref(access)) and access.value in (2, 4)
 
-    def _initial_exposure(self):
-        sdk, handle = self.sdk, self.handle
-        mode, value = EnumValue(), FloatValue()
-        has_mode = not sdk.GetEnumValue(handle, b"ExposureAuto", C.byref(mode))
-        can_set_mode = has_mode and self._writable(b"ExposureAuto")
-        modes = mode.values[: mode.count]
-        if sdk.GetFloatValue(handle, b"ExposureTime", C.byref(value)):
-            return Exposure()
-        return Exposure(
-            value.current,
-            has_mode and mode.current != 0,
-            self._writable(b"ExposureTime") or (can_set_mode and 0 in modes),
-            can_set_mode and 2 in modes,  # GenICam ExposureAuto Continuous
-            value.minimum,
-            value.maximum,
+    def _read_float(self, node, error_message=None):
+        value = FloatValue()
+        code = self.sdk.GetFloatValue(self.handle, node, C.byref(value))
+        if code:
+            if error_message:
+                _check(code, error_message)
+            return FloatControl()
+        return FloatControl(value.current, self._writable(node), value.minimum, value.maximum)
+
+    def _read_settings(self, candling=False):
+        gamma = C.c_bool()
+        has_gamma = self._writable(b"GammaEnable") and not self.sdk.GetBoolValue(
+            self.handle, b"GammaEnable", C.byref(gamma)
+        )
+        return CameraSettings(
+            exposure=self._read_float(b"ExposureTime", "无法读取海康相机曝光时间"),
+            gain=self._read_float(b"Gain") if self._manual_gain else FloatControl(),
+            gamma_enabled=gamma.value if has_gamma else None,
+            candling=candling,
         )
 
-    def read(self, exposure_change):
+    def _apply_settings(self, change):
+        current = self.settings
+        normal = self._normal_settings
+        exposure, gain, gamma = change.exposure_us, change.gain_db, None
+        if change.candling is True:
+            if not current.supports_candling:
+                return "当前海康相机无法手动设置曝光和增益"
+            normal = normal or current
+            gain = 0.0 if gain is None else gain
+            gamma = False if current.gamma_enabled is not None else None
+        elif change.candling is False and normal is not None:
+            exposure, gain, gamma = normal.exposure.value, normal.gain.value, normal.gamma_enabled
+            normal = None
+
+        sdk, handle = self.sdk, self.handle
+        writes = []
+        try:
+            for node, value, control, label in (
+                (b"ExposureTime", exposure, current.exposure, "曝光时间"),
+                (b"Gain", gain, current.gain, "增益"),
+            ):
+                if value is None:
+                    continue
+                if not control.writable:
+                    raise MvsError(f"当前海康相机无法设置{label}")
+                _check(sdk.SetFloatValue(handle, node, control.clamp(value)), f"无法设置海康相机{label}")
+                writes.append((sdk.SetFloatValue, node, control.value))
+            if gamma is not None and gamma != current.gamma_enabled:
+                _check(sdk.SetBoolValue(handle, b"GammaEnable", gamma), "无法设置海康相机 Gamma")
+                writes.append((sdk.SetBoolValue, b"GammaEnable", current.gamma_enabled))
+            updated = self._read_settings(candling=normal is not None)
+            if gain is not None and updated.gain.value is None:
+                raise MvsError("无法读取海康相机增益")
+            if gamma is not None and updated.gamma_enabled != gamma:
+                raise MvsError("无法确认海康相机 Gamma 设置")
+        except MvsError as error:
+            for setter, node, value in reversed(writes):
+                _check(setter(handle, node, value), "无法恢复海康相机参数，请重新连接")
+            return str(error)
+
+        self.settings = updated
+        self._normal_settings = normal
+        return ""
+
+    def read(self, change):
         error = ""
-        if exposure_change is not None:
-            auto, microseconds = exposure_change
-            try:
-                self.set_exposure(auto, microseconds)
-            except MvsError as exc:
-                error = str(exc)
-            self.exposure = self._initial_exposure()
-        elif time.monotonic() - self.exposure_read_at >= 1:
-            self.exposure_read_at = time.monotonic()
-            value = FloatValue()
-            if not self.sdk.GetFloatValue(self.handle, b"ExposureTime", C.byref(value)):
-                self.exposure = replace(self.exposure, microseconds=value.current)
+        if change is not None:
+            _check(self.sdk.StopGrabbing(self.handle), "无法暂停海康相机取流以更新参数")
+            self.grabbing = False
+            error = self._apply_settings(change)
+            self._start_grabbing()
         frame = FrameOut()
         code = self.sdk.GetImageBuffer(self.handle, C.byref(frame), 80)
         if code and not self.sdk.is_connected(self.handle):
             raise MvsError("海康相机已断开，请连接设备后刷新并重连")
         if code & 0xFFFFFFFF == NO_DATA:
-            return None, self.exposure, error
+            return None, self.settings, error
         _check(code, "海康相机取流失败，请检查 USB 连接")
         try:
             image = mono_image(frame)
         finally:
             _check(self.sdk.FreeImageBuffer(self.handle, C.byref(frame)), "无法释放海康图像缓冲区")
-        return (image, time.monotonic()), self.exposure, error
-
-    def set_exposure(self, auto, microseconds):
-        sdk, handle = self.sdk, self.handle
-        if self._writable(b"ExposureAuto"):
-            mode = b"Continuous" if auto else b"Off"
-            _check(sdk.SetEnumValueByString(handle, b"ExposureAuto", mode), "无法切换海康相机曝光模式")
-        if not auto:
-            _check(sdk.SetFloatValue(handle, b"ExposureTime", microseconds), "无法设置海康相机曝光时间")
+        return (image, time.monotonic()), self.settings, error
 
     def close(self):
         if self.sdk is None:
             return
         if self.grabbing:
             self.sdk.StopGrabbing(self.handle)
+        if self._normal_settings is not None and self.sdk.is_connected(self.handle):
+            try:
+                error = self._apply_settings(SettingsChange(candling=False))
+                if error:
+                    logging.warning("%s", error)
+            except MvsError:
+                logging.exception("无法恢复海康相机参数")
         if self.opened:
             self.sdk.CloseDevice(self.handle)
         if self.handle:
@@ -388,4 +449,6 @@ class MvsCamera:
         self.sdk.close()
         self.handle = C.c_void_p()
         self.opened = self.grabbing = False
+        self.settings = CameraSettings()
+        self._normal_settings = None
         self.sdk = None

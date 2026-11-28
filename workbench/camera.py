@@ -56,6 +56,7 @@ class CameraController(QObject):
     status = Signal(str)
     devices_changed = Signal()
     connected = Signal(bool)
+    settings_frame_ready = Signal()
     recording_changed = Signal()
     recording_duration = Signal("qlonglong")
     video_finished = Signal(str, "qlonglong")
@@ -70,7 +71,7 @@ class CameraController(QObject):
         self.mvs.connected.connect(self.connected)
         self.mvs.frame.connect(self._mvs_frame)
         self.mvs.failed.connect(self._mvs_failed)
-        self.mvs.exposure_error.connect(self.status)
+        self.mvs.settings_error.connect(self.status)
         self.session = QMediaCaptureSession(self)
         self.sink = None
         self._reset_sink()
@@ -286,10 +287,13 @@ class CameraController(QObject):
         generation, received_at, image, preview = result
         if generation != self._stream_generation or image.isNull():
             return
+        settings_ready = self.capture_settings_ready
         self.latest = image
         self.frame_at = received_at
         self.preview.emit(preview, image.size())
         self.frame.emit(image)
+        if not settings_ready and self.capture_settings_ready:
+            self.settings_frame_ready.emit()
 
     @Slot(str)
     def _frame_failed(self, message):
@@ -310,7 +314,7 @@ class CameraController(QObject):
             self._video_input is not None
             and self.video_busy
             and not self.recording_stopping
-            and time.monotonic() - self._last_video_sent_at > 4
+            and time.monotonic() - self._last_video_sent_at > 4 + self.mvs.exposure_wait
         ):
             self._recording_error = "视频编码器未接收海康画面，请检查 Qt FFmpeg / H.264 支持"
             self.stop_recording()
@@ -325,15 +329,24 @@ class CameraController(QObject):
                 self._recording_error = "摄像头画面中断，录制已停止"
                 self.stop_recording()
 
+    @property
+    def capture_settings_ready(self):
+        return not self.mvs.active or (
+            not self.mvs.settings_pending and self.frame_at >= self.mvs.settings_frame_at
+        )
+
     def snapshot(self):
-        if self.latest.isNull() or time.monotonic() - self.frame_at > 2:
+        if not self.capture_settings_ready:
+            raise ValueError("正在应用相机参数，请等待新画面")
+        if self.latest.isNull() or time.monotonic() - self.frame_at > 2 + self.mvs.exposure_wait:
             raise ValueError("暂无可采集的新画面，请连接摄像头并等待预览")
         return QImage(self.latest)  # Immutable shared pixels; saving detaches on the worker.
 
     def metadata(self):
         if self.mvs.active:
-            exposure = self.mvs.exposure.microseconds
-            return dict(
+            settings = self.mvs.settings
+            exposure = settings.exposure.value
+            metadata = dict(
                 device=self.mvs.device.model,
                 device_id=self.device_id.hex(),
                 width=WIDTH,
@@ -341,6 +354,13 @@ class CameraController(QObject):
                 exposure_time=exposure / 1_000_000 if exposure is not None else None,
                 pixel_format="Mono8",
             )
+            if settings.gain.value is not None:
+                metadata["gain_db"] = settings.gain.value
+            if settings.gamma_enabled is not None:
+                metadata["gamma_enabled"] = settings.gamma_enabled
+            if settings.candling:
+                metadata["capture_profile"] = "candling"
+            return metadata
         if not self.camera:
             return {}
         camera = self.camera

@@ -1,10 +1,15 @@
+import json
 import sys
 import threading
 import time
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QItemSelectionModel, QLockFile, QSettings
+from PySide6.QtCore import QItemSelectionModel, QLockFile, QSettings, Qt
+from PySide6.QtGui import QImage
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QListView
 
 from workbench.app import MainWindow
@@ -209,6 +214,142 @@ def test_mvs_stream_failure_discards_unfinished_recording(qt_app, tmp_path, monk
         assert pane.recording_context is None
         assert workspace.videos(dataset_id=dataset) == []
         assert not staging.parent.exists()
+    finally:
+        window.close()
+        qt_app.processEvents()
+
+
+def test_mvs_candling_applies_saved_settings_and_records_readback(qt_app, tmp_path, monkeypatch):
+    from workbench.mvs import MODEL, CameraSettings, FloatControl, MvsDevice, SettingsChange
+    from workbench.mvs_stream import MvsStream
+    from workbench.storage import Workspace
+
+    workspace = Workspace(tmp_path / "manual-exposure")
+    dataset = workspace.save_dataset("照蛋")
+    workspace.save_batch(dataset, "试拍")
+    lock = QLockFile(str(workspace.root / ".fieldwork.lock"))
+    assert lock.tryLock(100)
+    preferences = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(MvsStream, "refresh", lambda _: None)
+    window = MainWindow(workspace, preferences, tmp_path, lock)
+    pane = window.capture
+    stream = pane.camera.mvs
+    device = MvsDevice(MODEL, "1")
+    stream.devices = [device]
+    monkeypatch.setattr(pane.camera.media, "videoInputs", lambda: [])
+    monkeypatch.setattr(stream.backend, "open", lambda _: None)
+    ordinary = CameraSettings(
+        exposure=FloatControl(35_500, True, 15, 10_000_000),
+        gain=FloatControl(4, True, 0, 17),
+        gamma_enabled=True,
+    )
+    settings = ordinary
+    withhold_frame = threading.Event()
+    changes = []
+
+    def read(change):
+        nonlocal settings, ordinary
+        if change is not None:
+            changes.append(change)
+            if change.candling is False:
+                settings = ordinary
+            if change.candling is True:
+                settings = replace(settings, candling=True, gamma_enabled=False, gain=replace(settings.gain, value=0))
+            if change.exposure_us is not None:
+                settings = replace(settings, exposure=replace(settings.exposure, value=change.exposure_us))
+            if change.gain_db is not None:
+                settings = replace(settings, gain=replace(settings.gain, value=round(change.gain_db * 2) / 2))
+            if not settings.candling:
+                ordinary = settings
+        if withhold_frame.is_set():
+            return None, settings, ""
+        image = QImage(4, 4, QImage.Format.Format_Grayscale8)
+        image.fill(0)
+        return (image, time.monotonic()), settings, ""
+
+    monkeypatch.setattr(stream.backend, "read", read)
+    try:
+        window.open_capture(dataset)
+        pane.refresh_devices()
+        pane.connect_camera()
+        pump(qt_app, lambda: stream.active)
+        assert not pane.exposure_auto.isChecked()
+        assert not pane.exposure_auto.isEnabled()
+        assert pane.exposure.isEnabled()
+        assert pane.exposure.minimum() == 0.015
+        assert pane.exposure.maximum() == 10_000
+        assert pane.exposure.value() == 35.5
+        assert changes == []
+
+        pane.exposure.lineEdit().selectAll()
+        QTest.keyClicks(pane.exposure.lineEdit(), "55")
+        assert pane.exposure.value() == 35.5
+        QTest.keyClick(pane.exposure.lineEdit(), Qt.Key.Key_Return)
+        pump(qt_app, lambda: pane.camera.capture_settings_ready)
+        assert changes == [SettingsChange(exposure_us=55_000)]
+        assert pane.camera.metadata()["exposure_time"] == 0.055
+
+        withhold_frame.set()
+        pane.candling_mode.setChecked(True)
+        pump(qt_app, lambda: stream.settings.candling)
+        assert not pane.shoot.isEnabled()
+        with pytest.raises(ValueError, match="等待新画面"):
+            pane.camera.snapshot()
+        withhold_frame.clear()
+        pump(qt_app, lambda: pane.shoot.isEnabled())
+        assert pane.gain.value() == 0
+        pane.exposure.setValue(80.5)
+        pump(qt_app, lambda: pane.camera.capture_settings_ready)
+        pane.gain.setValue(2.7)
+        pump(qt_app, lambda: pane.camera.capture_settings_ready)
+        assert pane.gain.value() == 2.5
+        pane.save_candling.click()
+        persisted = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
+        assert persisted.value(f"capture/candling/{device.id().hex()}") == {
+            "exposure_us": 80_500,
+            "gain_db": 2.5,
+        }
+
+        pane.candling_mode.setChecked(False)
+        pump(qt_app, lambda: pane.camera.capture_settings_ready)
+        assert pane.exposure.value() == 55
+        assert pane.gain.value() == 4
+        pane.disconnect_camera()
+        pane.connect_camera()
+        pump(qt_app, lambda: stream.active)
+        pane.candling_mode.setChecked(True)
+        pump(qt_app, lambda: pane.camera.capture_settings_ready)
+        assert changes[-1] == SettingsChange(exposure_us=80_500, gain_db=2.5, candling=True)
+
+        pane.take_photo()
+        pump(qt_app, lambda: not window.runner.busy)
+        photo = workspace.photos(dataset_id=dataset)[0]
+        expected = {"capture_profile": "candling", "exposure_time": 0.0805, "gain_db": 2.5}
+        photo_camera = json.loads(photo["metadata"])["camera"]
+        assert {key: photo_camera[key] for key in expected} == expected
+
+        def start_recording(path):
+            Path(path).write_bytes(b"video fixture")
+            pane.camera.recording_path = path
+            pane.camera.recording_changed.emit()
+
+        monkeypatch.setattr(pane.camera, "start_recording", start_recording)
+        pane.mode_combo.setCurrentIndex(1)
+        pane.toggle_recording()
+        assert not pane.gain.isEnabled()
+        assert not pane.exposure.isEnabled()
+        pane.set_gain(7)
+        assert not stream.settings_pending
+        pane.camera.recording_path = None
+        pane.camera.recording_changed.emit()
+        pane._video_finished(pane.recording_context["path"], 1_000)
+        pump(qt_app, lambda: not window.runner.busy)
+        video_camera = json.loads(workspace.videos(dataset_id=dataset)[0]["metadata"])["camera"]
+        assert {key: video_camera[key] for key in expected} == expected
+
+        pane.disconnect_camera()
+        assert pane.exposure_auto.isChecked()
+        assert pane.exposure.value() == 10
     finally:
         window.close()
         qt_app.processEvents()

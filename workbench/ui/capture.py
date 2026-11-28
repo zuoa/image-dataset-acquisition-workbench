@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import shutil
+from math import isfinite
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import QSignalBlocker, Qt, QTimer
+from PySide6.QtCore import QSettings, QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QImage
 from PySide6.QtMultimedia import QCamera
 from PySide6.QtWidgets import QHBoxLayout, QListWidget, QSplitter, QVBoxLayout, QWidget
@@ -23,6 +24,7 @@ from qfluentwidgets import (
 )
 
 from ..camera import CameraController
+from ..mvs import SettingsChange
 from ..timeutils import display_now
 from .canvas import ImageCanvas
 from .common import (
@@ -217,6 +219,20 @@ class CapturePage(QWidget):
         self.exposure.setSuffix(" ms 曝光")
         self.exposure.valueChanged.connect(self.set_exposure)
         box.addWidget(self.exposure)
+        self.gain = DoubleSpinBox()
+        self.gain.setSuffix(" dB 增益")
+        self.gain.setKeyboardTracking(False)
+        self.gain.valueChanged.connect(self.set_gain)
+        box.addWidget(self.gain)
+        self.candling_mode = SwitchButton("照蛋模式")
+        self.candling_mode.setOnText("照蛋模式")
+        self.candling_mode.checkedChanged.connect(self.set_candling_mode)
+        self.save_candling = PushButton("保存照蛋预设")
+        self.save_candling.clicked.connect(self.save_candling_preset)
+        candling = QHBoxLayout()
+        candling.addWidget(self.candling_mode, 1)
+        candling.addWidget(self.save_candling)
+        box.addLayout(candling)
         self.wb = ComboBox()
         self.wb.addItems(["自动白平衡", "日光", "阴天", "白炽灯"])
         self.wb.currentIndexChanged.connect(self.set_white_balance)
@@ -302,7 +318,8 @@ class CapturePage(QWidget):
         self.camera.status.connect(self.camera_status)
         self.camera.connected.connect(self.camera_connected)
         self.camera.devices_changed.connect(self._populate_devices)
-        self.camera.mvs.exposure_changed.connect(self._sync_mvs_exposure)
+        self.camera.mvs.settings_changed.connect(self._sync_mvs_settings)
+        self.camera.settings_frame_ready.connect(self.update_capture_controls)
         self.camera.recording_changed.connect(self.update_capture_controls)
         self.camera.recording_duration.connect(
             lambda duration: self.recording_time.setText("●  " + video_duration(duration))
@@ -436,7 +453,7 @@ class CapturePage(QWidget):
     def update_capture_controls(self):
         busy = self.camera.video_busy
         saving_photo = self.camera.saving_photo
-        active = self.camera.active
+        ready = self.camera.active and self.camera.capture_settings_ready
         self.options_scroll.setEnabled(not busy and not saving_photo)
         self.mode_combo.setEnabled(not busy and not saving_photo)
         self.sample.setEnabled(not busy)
@@ -444,7 +461,7 @@ class CapturePage(QWidget):
         self.recording_time.setVisible(busy)
         self.app.navigationInterface.setEnabled(not busy and not self.app.runner.busy)
         self.shoot.setEnabled(
-            (active or busy) and not self.app.runner.busy and not self.camera.recording_stopping
+            (ready or busy) and not self.app.runner.busy and not self.camera.recording_stopping
         )
         self.shoot.setText(
             "正在保存视频…"
@@ -456,12 +473,15 @@ class CapturePage(QWidget):
             else "拍照  Space"
         )
         self.shoot.setIcon(FIF.VIDEO if self.video_mode else FIF.CAMERA)
-        self.interval_button.setEnabled(active and not self.video_mode)
+        self.interval_button.setEnabled(ready and not self.video_mode)
+        self._update_mvs_controls()
 
     def open_videos(self):
         self.app.open_library(self.dataset_id(), "video", self.batch_id())
 
     def request_capture(self):
+        if not self.camera.capture_settings_ready:
+            return
         if self.video_mode:
             self.toggle_recording()
         else:
@@ -471,7 +491,7 @@ class CapturePage(QWidget):
         if self.camera.video_busy:
             self.camera.stop_recording()
             return
-        if self.app.runner.busy:
+        if self.app.runner.busy or not self.camera.capture_settings_ready:
             return
         path = None
         try:
@@ -628,13 +648,18 @@ class CapturePage(QWidget):
         support = camera.supportedFeatures() if active and camera else QCamera.Feature(0)
         if active and self.camera.mvs.active:
             self._native_exposure = (self.exposure_auto.isChecked(), self.exposure.value())
-            self._sync_mvs_exposure()
+            self.exposure.setKeyboardTracking(False)
+            with QSignalBlocker(self.exposure):
+                self.exposure.setDecimals(3)
+            self._sync_mvs_settings()
         else:
             if self._native_exposure is not None:
                 auto, value = self._native_exposure
                 self._native_exposure = None
                 with QSignalBlocker(self.exposure_auto), QSignalBlocker(self.exposure):
                     self.exposure_auto.setChecked(auto)
+                    self.exposure.setKeyboardTracking(True)
+                    self.exposure.setDecimals(2)
                     self.exposure.setRange(0.01, 1000)
                     self.exposure.setValue(value)
             self.exposure_auto.setEnabled(bool(support & QCamera.Feature.ManualExposureTime))
@@ -673,21 +698,93 @@ class CapturePage(QWidget):
                 self.focus.setItemEnabled(index, camera.isFocusModeSupported(mode))
         self.update_capture_controls()
 
-    def _sync_mvs_exposure(self):
-        exposure = self.camera.mvs.exposure
-        with QSignalBlocker(self.exposure_auto), QSignalBlocker(self.exposure):
-            self.exposure_auto.setChecked(exposure.auto)
-            if exposure.microseconds is not None:
-                self.exposure.setRange(exposure.min_us / 1000, min(1000, exposure.max_us / 1000))
-                self.exposure.setValue(exposure.microseconds / 1000)
-        self.exposure_auto.setEnabled(exposure.supports_auto)
-        self.exposure.setEnabled(exposure.manual and not exposure.auto)
+    def _sync_mvs_settings(self):
+        stream = self.camera.mvs
+        if not stream.active:
+            return
+        if stream.settings_pending:
+            self.camera_status("正在应用相机参数并等待新画面…")
+            self.update_capture_controls()
+            return
+        settings = stream.settings
+        with QSignalBlocker(self.exposure_auto), QSignalBlocker(self.candling_mode):
+            self.exposure_auto.setChecked(False)
+            self.candling_mode.setChecked(settings.candling)
+        for widget, control, scale in (
+            (self.exposure, settings.exposure, 1000),
+            (self.gain, settings.gain, 1),
+        ):
+            if control.value is not None:
+                with QSignalBlocker(widget):
+                    widget.setRange(control.minimum / scale, control.maximum / scale)
+                    widget.setValue(control.value / scale)
+        self.exposure_auto.setEnabled(False)
+        if self.stream_status.text() == "●  正在应用相机参数并等待新画面…":
+            self.camera_status("已连接 · " + self.camera.device_name)
+        self.update_capture_controls()
+
+    def _update_mvs_controls(self):
+        stream = self.camera.mvs
+        settings = stream.settings
+        self.gain.setVisible(stream.active and settings.gain.value is not None)
+        self.candling_mode.setVisible(stream.active)
+        self.save_candling.setVisible(stream.active)
+        if not stream.active:
+            return
+        editable = self._mvs_settings_editable()
+        self.exposure.setEnabled(editable and settings.exposure.writable)
+        self.gain.setEnabled(editable and settings.gain.writable)
+        self.candling_mode.setEnabled(editable and (settings.supports_candling or settings.candling))
+        self.save_candling.setEnabled(editable and settings.candling and settings.supports_candling)
+        self.candling_mode.setToolTip(
+            "开启时应用这台相机保存的曝光和增益" if settings.supports_candling
+            else "需要相机支持手动曝光和手动增益"
+        )
+
+    def _candling_key(self):
+        return f"capture/candling/{self.camera.mvs.device.id().hex()}"
+
+    def _mvs_settings_editable(self):
+        return (
+            self.camera.mvs.active
+            and self.camera.capture_settings_ready
+            and not self.running
+            and not self.camera.video_busy
+            and not self.camera.saving_photo
+        )
+
+    def set_candling_mode(self, enabled):
+        if not self._mvs_settings_editable():
+            return
+        preset = self.app.preferences.value(self._candling_key()) if enabled else None
+        if (
+            isinstance(preset, dict)
+            and all(
+                isinstance(preset.get(key), (int, float)) and isfinite(preset[key])
+                for key in ("exposure_us", "gain_db")
+            )
+        ):
+            change = SettingsChange(exposure_us=preset["exposure_us"], gain_db=preset["gain_db"], candling=True)
+        else:
+            change = SettingsChange(candling=enabled)
+        self.camera.mvs.adjust(change)
+
+    def save_candling_preset(self):
+        settings = self.camera.mvs.settings
+        if not (self._mvs_settings_editable() and settings.candling and settings.supports_candling):
+            return
+        preferences = self.app.preferences
+        preferences.setValue(self._candling_key(), dict(exposure_us=settings.exposure.value, gain_db=settings.gain.value))
+        preferences.sync()
+        if preferences.status() == QSettings.Status.NoError:
+            self.app.notify("已保存照蛋预设")
+        else:
+            self.app.notify("无法将照蛋预设写入应用设置", error=True)
 
     def set_exposure(self, *_):
         if self.camera.mvs.active:
-            auto = self.exposure_auto.isChecked()
-            self.exposure.setEnabled(self.camera.mvs.exposure.manual and not auto)
-            self.camera.mvs.set_exposure(auto, self.exposure.value())
+            if self._mvs_settings_editable():
+                self.camera.mvs.adjust(SettingsChange(exposure_us=self.exposure.value() * 1000))
             return
         camera = self.camera.camera
         if camera and camera.supportedFeatures() & QCamera.Feature.ManualExposureTime:
@@ -700,6 +797,10 @@ class CapturePage(QWidget):
                 camera.setAutoExposureTime()
             else:
                 camera.setManualExposureTime(self.exposure.value() / 1000)
+
+    def set_gain(self, value):
+        if self._mvs_settings_editable():
+            self.camera.mvs.adjust(SettingsChange(gain_db=value))
 
     def set_white_balance(self, index):
         camera = self.camera.camera
@@ -838,10 +939,13 @@ class CapturePage(QWidget):
     def toggle_interval(self):
         if self.running:
             self.stop_interval()
+        elif not self.camera.capture_settings_ready:
+            return
         elif self.batch_id():
             self.running = True
             self.interval_button.setText("停止采集")
             self.shot_timer.start(self.interval.value() * 1000)
+            self.update_capture_controls()
             self.take_photo()
         else:
             self.app.notify("请先选择采集批次", error=True)

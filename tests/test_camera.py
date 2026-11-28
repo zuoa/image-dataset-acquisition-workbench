@@ -3,13 +3,15 @@
 import ctypes
 import threading
 import time
+from types import SimpleNamespace
+from unittest.mock import ANY, Mock, call
 
 import pytest
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtMultimedia import QtVideo, QVideoFrame
 
-from workbench import camera, mvs
+from workbench import camera, mvs, mvs_stream
 
 
 def pump(app, predicate, seconds=5):
@@ -181,6 +183,143 @@ def test_mvs_mono8_snapshot_owns_the_sdk_pixels():
         mvs.mono_image(frame)
 
 
+def test_mvs_applies_manual_settings_and_restores_them_on_exit_or_failure(monkeypatch):
+    device = mvs.MvsDevice(mvs.MODEL, "1")
+    sdk = Mock()
+    for name in (
+        "Initialize",
+        "CreateHandle",
+        "OpenDevice",
+        "CloseDevice",
+        "Finalize",
+        "SetIntValueEx",
+        "StartGrabbing",
+        "StopGrabbing",
+    ):
+        getattr(sdk, name).return_value = 0
+    sdk.devices.return_value = [(device, 1)]
+    sdk.GetImageBuffer.return_value = mvs.NO_DATA
+    sdk.is_connected.return_value = True
+    modes = {b"ExposureAuto": b"Continuous", b"GainAuto": b"Continuous"}
+    controls = {b"ExposureTime": 30_000, b"Gain": 4}
+    ranges = {b"ExposureTime": (15, 10_000_000), b"Gain": (0, 17)}
+    gamma_enabled = True
+
+    def set_enum(handle, node, value):
+        if node in modes:
+            modes[node] = value
+        return 0
+
+    def get_float(handle, node, pointer):
+        assert set(modes.values()) == {b"Off"}
+        pointer._obj.current = controls[node]
+        pointer._obj.minimum, pointer._obj.maximum = ranges[node]
+        return 0
+
+    def set_float(handle, node, value):
+        assert set(modes.values()) == {b"Off"}
+        if node == b"Gain" and value == 16:
+            return 1
+        controls[node] = value
+        return 0
+
+    def get_bool(handle, node, pointer):
+        assert node == b"GammaEnable"
+        pointer._obj.value = gamma_enabled
+        return 0
+
+    def set_bool(handle, node, value):
+        nonlocal gamma_enabled
+        if node == b"AcquisitionFrameRateEnable":
+            return 1
+        assert node == b"GammaEnable"
+        gamma_enabled = value
+        return 0
+
+    def node_access(handle, node, pointer):
+        pointer._obj.value = 4
+        return 0
+
+    sdk.SetEnumValueByString.side_effect = set_enum
+    sdk.GetFloatValue.side_effect = get_float
+    sdk.SetFloatValue.side_effect = set_float
+    sdk.GetBoolValue.side_effect = get_bool
+    sdk.SetBoolValue.side_effect = set_bool
+    sdk.node_access.side_effect = node_access
+    monkeypatch.setattr(mvs, "MvsSdk", lambda: sdk)
+    backend = mvs.MvsCamera()
+    try:
+        backend.open(device)
+        start = sdk.mock_calls.index(call.StartGrabbing(ANY))
+        for node in modes:
+            assert sdk.mock_calls.index(call.SetEnumValueByString(ANY, node, b"Off")) < start
+        ordinary = mvs.CameraSettings(
+            exposure=mvs.FloatControl(30_000, True, 15, 10_000_000),
+            gain=mvs.FloatControl(4, True, 0, 17),
+            gamma_enabled=True,
+        )
+        assert backend.settings == ordinary
+
+        _, settings, error = backend.read(mvs.SettingsChange(exposure_us=5_000_000, gain_db=16, candling=True))
+        assert settings == ordinary
+        assert controls == {b"ExposureTime": 30_000, b"Gain": 4}
+        assert "无法设置海康相机增益" in error
+
+        sdk.reset_mock()
+        change = mvs.SettingsChange(exposure_us=5_000_000, gain_db=3, candling=True)
+        assert backend.read(change) == (
+            None,
+            mvs.CameraSettings(
+                exposure=mvs.FloatControl(5_000_000, True, 15, 10_000_000),
+                gain=mvs.FloatControl(3, True, 0, 17),
+                gamma_enabled=False,
+                candling=True,
+            ),
+            "",
+        )
+        assert (
+            sdk.mock_calls.index(call.StopGrabbing(ANY))
+            < sdk.mock_calls.index(call.SetFloatValue(ANY, b"ExposureTime", 5_000_000))
+            < sdk.mock_calls.index(call.StartGrabbing(ANY))
+            < sdk.mock_calls.index(call.GetImageBuffer(ANY, ANY, 80))
+        )
+        assert backend.read(mvs.SettingsChange(candling=False)) == (None, ordinary, "")
+        assert gamma_enabled
+    finally:
+        backend.close()
+
+
+def test_mvs_waits_for_a_long_exposure_before_reporting_missing_frames(qt_app, monkeypatch):
+    stream = mvs_stream.MvsStream()
+    device = mvs.MvsDevice(mvs.MODEL, "1")
+    settings = mvs.CameraSettings(exposure=mvs.FloatControl(10_000_000, True, 15, 10_000_000))
+    current_time = 100.0
+    errors = []
+    stream.failed.connect(errors.append)
+
+    def submit(work, done=None):
+        value = work()
+        if done is not None:
+            done(value, "")
+
+    monkeypatch.setattr(mvs_stream, "time", SimpleNamespace(monotonic=lambda: current_time))
+    monkeypatch.setattr(stream, "_submit", submit)
+    monkeypatch.setattr(stream.backend, "open", lambda _: None)
+    monkeypatch.setattr(stream.backend, "read", lambda _: (None, settings, ""))
+    try:
+        stream.open(device)
+        current_time += 10
+        stream._read()
+        assert stream.device == device
+        assert errors == []
+        current_time += 5
+        stream._read()
+        assert stream.device is None
+        assert len(errors) == 1
+    finally:
+        stream.stop()
+
+
 def test_mvs_reconnect_discards_in_flight_frame(qt_app, monkeypatch):
     controller = camera.CameraController()
     devices = [mvs.MvsDevice(mvs.MODEL, serial) for serial in ("1", "2")]
@@ -200,7 +339,7 @@ def test_mvs_reconnect_discards_in_flight_frame(qt_app, monkeypatch):
             assert release.wait(5)
         else:
             image.fill(QColor("black"))
-        return (image, time.monotonic()), mvs.Exposure(), ""
+        return (image, time.monotonic()), mvs.CameraSettings(), ""
 
     monkeypatch.setattr(backend, "open", opened.append)
     monkeypatch.setattr(backend, "read", read)
